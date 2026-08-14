@@ -84,11 +84,12 @@ class AnthropicProvider:
         if payload.get("stop_reason") == "pause_turn":
             raise ProviderError("Source research did not finish after several search continuations; try again.")
         self._validate_response(payload)
+        self._validate_content_blocks(payload)
         text = self._extract_text(payload)
         if not text.strip():
             raise ProviderError("The model completed without returning structured text; try the cycle again.")
         try:
-            result = json.loads(self._unwrap_json_fence(text))
+            result = self._parse_json_text(text)
         except json.JSONDecodeError as exc:
             raise ProviderError("The model returned text that was not valid structured JSON; try the cycle again.") from exc
         if not isinstance(result, dict):
@@ -160,13 +161,47 @@ class AnthropicProvider:
                 if not isinstance(value, str):
                     raise ProviderError("The model response contained an invalid text block; try again.")
                 parts.append(value)
-        return "".join(parts)
+        return "\n".join(parts)
 
     @staticmethod
-    def _unwrap_json_fence(text: str) -> str:
+    def _validate_content_blocks(payload: dict[str, Any]) -> None:
+        for block in payload["content"]:
+            if not isinstance(block, dict) or block.get("type") != "web_search_tool_result":
+                continue
+            content = block.get("content")
+            if isinstance(content, dict) and content.get("type") == "web_search_tool_result_error":
+                code = content.get("error_code") if isinstance(content.get("error_code"), str) else "unknown"
+                explanations = {
+                    "too_many_requests": "Web search was rate limited; wait briefly and try again.",
+                    "max_uses_exceeded": "Web search reached its per-cycle search limit before source collection completed.",
+                    "unavailable": "Web search is temporarily unavailable; try again shortly.",
+                }
+                raise ProviderError(explanations.get(code, "Web search failed (%s); review the brief and try again." % code))
+
+    @staticmethod
+    def _parse_json_text(text: str) -> Any:
         stripped = text.strip()
-        fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", stripped, flags=re.IGNORECASE)
-        return fenced.group(1).strip() if fenced else stripped
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            original_error = exc
+        fenced_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", stripped, flags=re.IGNORECASE)
+        for candidate in reversed(fenced_blocks):
+            try:
+                return json.loads(candidate.strip())
+            except json.JSONDecodeError:
+                continue
+        decoder = json.JSONDecoder()
+        for position in range(len(stripped) - 1, -1, -1):
+            if stripped[position] != "{":
+                continue
+            try:
+                result, _ = decoder.raw_decode(stripped[position:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(result, dict):
+                return result
+        raise original_error
 
 
 class FixtureProvider:

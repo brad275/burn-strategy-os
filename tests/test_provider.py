@@ -38,6 +38,17 @@ class AnthropicProviderTests(unittest.TestCase):
         result, _ = self.request({"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": '```json\n{"sources": []}\n```'}]})
         self.assertEqual(result, {"sources": []})
 
+    def test_search_preamble_before_final_json(self):
+        result, _ = self.request({
+            "type": "message", "stop_reason": "end_turn", "content": [
+                {"type": "text", "text": "I'll search for current sources."},
+                {"type": "server_tool_use", "id": "srv-1", "name": "web_search", "input": {"query": "current sources"}},
+                {"type": "web_search_tool_result", "tool_use_id": "srv-1", "content": []},
+                {"type": "text", "text": '```json\n{"sources": []}\n```'},
+            ],
+        })
+        self.assertEqual(result, {"sources": []})
+
     def test_pause_turn_then_completion_preserves_original_turn(self):
         paused_content = [
             {"type": "server_tool_use", "id": "srv-1", "name": "web_search", "input": {"query": "example"}},
@@ -73,6 +84,15 @@ class AnthropicProviderTests(unittest.TestCase):
             self.request({"type": "message", "stop_reason": "max_tokens", "content": [{"type": "text", "text": "{"}]})
         with self.assertRaisesRegex(ProviderError, "content list"):
             self.request({"type": "message", "stop_reason": "end_turn", "content": {}})
+
+    def test_web_search_error_block(self):
+        with self.assertRaisesRegex(ProviderError, "search limit"):
+            self.request({
+                "type": "message", "stop_reason": "end_turn", "content": [{
+                    "type": "web_search_tool_result", "tool_use_id": "srv-1",
+                    "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"},
+                }],
+            })
 
 
 if __name__ == "__main__":
