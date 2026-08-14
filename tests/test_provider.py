@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from strategy_os.provider import AnthropicProvider, ProviderError
+from strategy_os.provider import AnthropicProvider, ProviderError, REQUEST_TIMEOUT_SECONDS
 
 
 class _Response:
@@ -31,8 +31,9 @@ class AnthropicProviderTests(unittest.TestCase):
         return result, mocked
 
     def test_normal_json_text(self):
-        result, _ = self.request({"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": '{"sources": []}'}]})
+        result, mocked = self.request({"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": '{"sources": []}'}]})
         self.assertEqual(result, {"sources": []})
+        self.assertEqual(mocked.call_args.kwargs["timeout"], REQUEST_TIMEOUT_SECONDS)
 
     def test_fenced_json_text(self):
         result, _ = self.request({"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": '```json\n{"sources": []}\n```'}]})

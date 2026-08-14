@@ -9,6 +9,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+REQUEST_TIMEOUT_SECONDS = 240
+
+
 class ProviderError(RuntimeError):
     pass
 
@@ -108,7 +111,7 @@ class AnthropicProvider:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=90) as response:
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 raw = response.read().decode()
         except HTTPError as exc:
             raise ProviderError(self._http_failure(exc.code)) from exc
