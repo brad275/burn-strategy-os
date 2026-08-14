@@ -83,9 +83,26 @@ class PilotAppTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 503)
                 self.assertIn("not been configured", response.json()["detail"])
 
+    def test_live_cycle_requires_xai_key(self) -> None:
+        with TemporaryDirectory() as raw:
+            app = create_app(Settings(Path(raw), "test-access-token", "configured", "test", "test-sha"))
+            with TestClient(app) as client:
+                self.login(client)
+                project = client.post("/api/projects", json={
+                    "name": "Pragmatic Play strategy pilot", "brand_name": "Pragmatic Play",
+                    "brief_markdown": "A detailed working brief that is sufficiently long for a secure live-provider configuration failure test.",
+                    "mode": "live", "expected_revision": 0,
+                }).json()["project"]
+                response = client.post(
+                    "/api/projects/{}/{}/{}/cycles".format(project["organisation_id"], project["brand_id"], project["project_id"]),
+                    json={"expected_revision": 1, "mode": "live"},
+                )
+                self.assertEqual(response.status_code, 503)
+                self.assertIn("not been configured", response.json()["detail"])
+
     def test_failed_cycle_exposes_safe_ledger_reason(self) -> None:
         with TemporaryDirectory() as raw:
-            app = create_app(Settings(Path(raw), "test-access-token", "configured", "test", "test-sha"), FailingProvider())
+            app = create_app(Settings(Path(raw), "test-access-token", "configured", "test", "test-sha", xai_api_key="configured"), FailingProvider())
             with TestClient(app) as client:
                 self.login(client)
                 project = client.post("/api/projects", json={

@@ -18,7 +18,9 @@ Create a single private Railway service from this repository and configure:
 
 | Variable | Value |
 | --- | --- |
-| `ANTHROPIC_API_KEY` | sealed Anthropic API key |
+| `ANTHROPIC_API_KEY` | sealed Anthropic API key (source collection / web search) |
+| `XAI_API_KEY` | sealed xAI API key (Grok 4.6 for every later stage) |
+| `XAI_MODEL` | optional; defaults to `grok-4.6` |
 | `APP_ACCESS_TOKEN` | sealed, long random private access token |
 | `DATA_ROOT` | `/app/data` |
 | `APP_ENV` | `pilot` |
@@ -36,7 +38,7 @@ DATA_ROOT=/tmp/burn-strategy-os APP_ACCESS_TOKEN=local-only APP_ENV=development 
   python3 -m uvicorn strategy_os.app:app --host 127.0.0.1 --port 8000
 ```
 
-Open `http://127.0.0.1:8000/login`, use `local-only`, create the Pragmatic Play project and start its cycle after configuring `ANTHROPIC_API_KEY`. The test suite uses a fixture provider only; it does not call Anthropic.
+Open `http://127.0.0.1:8000/login`, use `local-only`, create the Pragmatic Play project and start its cycle after configuring `ANTHROPIC_API_KEY` and `XAI_API_KEY`. The test suite uses a fixture provider only; it does not call Anthropic or xAI.
 
 ## Foundation controls
 

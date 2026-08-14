@@ -24,6 +24,8 @@ STAGE_MAX_TOKENS = {
 }
 RESEARCH_SOURCE_LIMIT = 12
 RESEARCH_EXCERPT_CHARS = 240
+DEFAULT_XAI_MODEL = "grok-4.6"
+XAI_API_URL = "https://api.x.ai/v1/chat/completions"
 
 
 class ProviderError(RuntimeError):
@@ -43,17 +45,7 @@ class AnthropicProvider:
         self.model = model
 
     def generate(self, stage_id: str, brief: str, context: dict[str, Any], revision: int) -> dict[str, Any]:
-        prompt = {
-            "role": "BURN Strategy OS evidence-led strategist",
-            "stage": stage_id,
-            "revision": revision,
-            "brief": brief,
-            "context": self._context_for_stage(stage_id, context),
-            "rules": self._rules_for_stage(stage_id),
-        }
-        if stage_id == "research":
-            prompt["output_schema"] = self._research_output_schema()
-        return self._request(json.dumps(prompt), STAGE_MAX_TOKENS.get(stage_id, DEFAULT_STAGE_MAX_TOKENS), use_web_search=False)
+        return self._request(json.dumps(build_generate_prompt(stage_id, brief, context, revision)), STAGE_MAX_TOKENS.get(stage_id, DEFAULT_STAGE_MAX_TOKENS), use_web_search=False)
 
     def collect_sources(self, brief: str, context: dict[str, Any]) -> list[dict[str, Any]]:
         prompt = {
@@ -300,6 +292,141 @@ class AnthropicProvider:
             "brand_slug": context.get("brand_slug"),
             "collected_sources": compact,
         }
+
+
+def build_generate_prompt(stage_id: str, brief: str, context: dict[str, Any], revision: int) -> dict[str, Any]:
+    prompt = {
+        "role": "BURN Strategy OS evidence-led strategist",
+        "stage": stage_id,
+        "revision": revision,
+        "brief": brief,
+        "context": AnthropicProvider._context_for_stage(stage_id, context),
+        "rules": AnthropicProvider._rules_for_stage(stage_id),
+    }
+    if stage_id == "research":
+        prompt["output_schema"] = AnthropicProvider._research_output_schema()
+    return prompt
+
+
+class XaiProvider:
+    """Grok chat-completions adapter for strategy stages. Does not run web search."""
+
+    def __init__(self, api_key: str, model: str = DEFAULT_XAI_MODEL) -> None:
+        self.api_key = api_key
+        self.model = model or DEFAULT_XAI_MODEL
+
+    def generate(self, stage_id: str, brief: str, context: dict[str, Any], revision: int) -> dict[str, Any]:
+        return self._request(json.dumps(build_generate_prompt(stage_id, brief, context, revision)), STAGE_MAX_TOKENS.get(stage_id, DEFAULT_STAGE_MAX_TOKENS))
+
+    def collect_sources(self, brief: str, context: dict[str, Any]) -> list[dict[str, Any]]:
+        raise ProviderError("Grok is not used for source collection; Anthropic web search is required.")
+
+    def _request(self, prompt: str, max_tokens: int) -> dict[str, Any]:
+        payload = self._post({
+            "model": self.model,
+            "temperature": 0.2,
+            "max_completion_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": "Return only valid JSON. No markdown fences. No preamble."},
+                {"role": "user", "content": prompt},
+            ],
+        })
+        self._validate_response(payload)
+        text = self._extract_text(payload)
+        if not text.strip():
+            raise ProviderError("The model completed without returning structured text; try the cycle again.")
+        try:
+            result = AnthropicProvider._parse_json_text(text)
+        except json.JSONDecodeError as exc:
+            raise ProviderError("The model returned text that was not valid structured JSON; try the cycle again.") from exc
+        if not isinstance(result, dict):
+            raise ProviderError("The model returned an unexpected structured result instead of a JSON object.")
+        return result
+
+    def _post(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+        request = Request(
+            XAI_API_URL,
+            data=json.dumps(request_payload).encode(),
+            headers={
+                "content-type": "application/json",
+                "authorization": "Bearer %s" % self.api_key,
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                raw = response.read().decode()
+        except HTTPError as exc:
+            raise ProviderError(self._http_failure(exc.code)) from exc
+        except (URLError, TimeoutError) as exc:
+            raise ProviderError("The Grok provider could not complete this strategy stage because the connection failed; try again.") from exc
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ProviderError("The Grok provider returned an unreadable response; try again.") from exc
+        if not isinstance(payload, dict):
+            raise ProviderError("The Grok provider returned an unexpected response shape; try again.")
+        return payload
+
+    @staticmethod
+    def _http_failure(status: int) -> str:
+        if status in {401, 403}:
+            return "The Grok provider rejected authentication; check the configured Railway XAI_API_KEY."
+        if status == 429:
+            return "The Grok provider rate limit was reached; wait briefly and try again."
+        if status >= 500:
+            return "The Grok provider is temporarily unavailable; try again shortly."
+        return "The Grok provider rejected the request (HTTP %d); review the stage configuration." % status
+
+    @staticmethod
+    def _validate_response(payload: dict[str, Any]) -> None:
+        if isinstance(payload.get("error"), dict):
+            error = payload["error"]
+            error_type = error.get("type") if isinstance(error.get("type"), str) else "provider_error"
+            raise ProviderError("The Grok provider returned an API error (%s); try again or review the provider configuration." % error_type)
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise ProviderError("The Grok provider returned an unexpected response shape; try again.")
+        choice = choices[0]
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        if isinstance(message.get("refusal"), str) and message["refusal"].strip():
+            raise ProviderError("The model declined this request; review the brief wording before trying again.")
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "length":
+            raise ProviderError("The model response was cut off before the structured result was complete; reduce the brief or raise the output limit.")
+        if finish_reason == "content_filter":
+            raise ProviderError("The model declined this request; review the brief wording before trying again.")
+        if finish_reason not in {"stop", "end_turn", None}:
+            label = finish_reason if isinstance(finish_reason, str) else "missing"
+            raise ProviderError("The model returned an unexpected completion state (%s); try again." % label)
+
+    @staticmethod
+    def _extract_text(payload: dict[str, Any]) -> str:
+        choice = payload["choices"][0]
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise ProviderError("The Grok provider returned an unexpected response shape; try again.")
+        value = message.get("content")
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ProviderError("The Grok provider returned an invalid text block; try again.")
+        return value
+
+
+class LiveStrategyProvider:
+    """Sonnet collects sources. Grok 4.6 writes every later strategy stage."""
+
+    def __init__(self, anthropic: AnthropicProvider, xai: XaiProvider) -> None:
+        self.anthropic = anthropic
+        self.xai = xai
+
+    def generate(self, stage_id: str, brief: str, context: dict[str, Any], revision: int) -> dict[str, Any]:
+        return self.xai.generate(stage_id, brief, context, revision)
+
+    def collect_sources(self, brief: str, context: dict[str, Any]) -> list[dict[str, Any]]:
+        return self.anthropic.collect_sources(brief, context)
 
 
 class FixtureProvider:

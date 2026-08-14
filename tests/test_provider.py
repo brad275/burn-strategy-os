@@ -7,12 +7,15 @@ from unittest.mock import patch
 from strategy_os.provider import (
     AnthropicProvider,
     DEFAULT_STAGE_MAX_TOKENS,
+    DEFAULT_XAI_MODEL,
+    LiveStrategyProvider,
     ProviderError,
     REQUEST_TIMEOUT_SECONDS,
     RESEARCH_EXCERPT_CHARS,
     RESEARCH_SOURCE_LIMIT,
     SOURCE_COLLECTION_MAX_TOKENS,
     STAGE_MAX_TOKENS,
+    XaiProvider,
 )
 
 
@@ -189,6 +192,65 @@ class AnthropicProviderTests(unittest.TestCase):
                     "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"},
                 }],
             })
+
+
+class XaiProviderTests(unittest.TestCase):
+    def setUp(self):
+        self.provider = XaiProvider("test-key")
+
+    def request(self, payload):
+        with patch("strategy_os.provider.urlopen", return_value=_Response(payload)) as mocked:
+            result = self.provider._request("original prompt", 8000)
+        return result, mocked
+
+    def test_json_object_and_research_token_limit(self):
+        captured = {}
+
+        def fake_request(prompt, max_tokens):
+            captured["prompt"] = json.loads(prompt)
+            captured["max_tokens"] = max_tokens
+            return {"stage": "research"}
+
+        self.provider._request = fake_request
+        result = self.provider.generate("research", "A working brief.", {
+            "cycle_id": "cycle-1",
+            "brand_slug": "pragmatic-play",
+            "source_collection": {"sources": [{"id": "source-1", "label": "Report", "type": "report", "publication_date": "2026-08-01", "accessed_date": "2026-08-14", "excerpt": "short"}]},
+        }, 1)
+        self.assertEqual(result, {"stage": "research"})
+        self.assertEqual(captured["max_tokens"], STAGE_MAX_TOKENS["research"])
+        self.assertEqual(captured["prompt"]["stage"], "research")
+        self.assertIn("concise", " ".join(captured["prompt"]["rules"]).lower())
+
+    def test_posts_json_mode_to_grok(self):
+        result, mocked = self.request({
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": '{"stage": "research"}'}}],
+        })
+        self.assertEqual(result, {"stage": "research"})
+        body = json.loads(mocked.call_args.args[0].data.decode())
+        self.assertEqual(body["model"], DEFAULT_XAI_MODEL)
+        self.assertEqual(body["max_completion_tokens"], 8000)
+        self.assertEqual(body["response_format"], {"type": "json_object"})
+        self.assertEqual(mocked.call_args.kwargs["timeout"], REQUEST_TIMEOUT_SECONDS)
+
+    def test_length_cutoff_uses_safe_reason(self):
+        with self.assertRaisesRegex(ProviderError, "cut off"):
+            self.request({"choices": [{"finish_reason": "length", "message": {"content": "{"}}]})
+
+    def test_refusal(self):
+        with self.assertRaisesRegex(ProviderError, "declined"):
+            self.request({"choices": [{"finish_reason": "stop", "message": {"content": "", "refusal": "no"}}]})
+
+
+class LiveStrategyProviderTests(unittest.TestCase):
+    def test_routes_sources_to_anthropic_and_stages_to_grok(self):
+        anthropic = AnthropicProvider("anthropic-key")
+        xai = XaiProvider("xai-key")
+        anthropic.collect_sources = lambda brief, context: [{"id": "source-1"}]
+        xai.generate = lambda stage_id, brief, context, revision: {"stage": stage_id, "revision": revision}
+        routed = LiveStrategyProvider(anthropic, xai)
+        self.assertEqual(routed.collect_sources("brief", {}), [{"id": "source-1"}])
+        self.assertEqual(routed.generate("research", "brief", {}, 1), {"stage": "research", "revision": 1})
 
 
 if __name__ == "__main__":

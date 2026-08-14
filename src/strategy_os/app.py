@@ -20,7 +20,7 @@ from .auth import COOKIE_NAME, issue_cookie, read_cookie
 from .config import Settings
 from .errors import ConflictError, NotFoundError, ValidationError
 from .models import CycleManifest, FeedbackEvent, FeedbackVerdict, Project, utc_now, validate_id
-from .provider import AnthropicProvider, FixtureProvider, StrategyProvider
+from .provider import AnthropicProvider, FixtureProvider, LiveStrategyProvider, StrategyProvider, XaiProvider
 from .repository import VaultRepository
 from .workflow import WorkflowRunner
 
@@ -151,11 +151,22 @@ def create_app(settings: Optional[Settings] = None, provider: Optional[StrategyP
             raise ConflictError("project revision changed; refresh and try again")
         metadata = _project_metadata(repository, project)
         mode = body.mode or metadata.get("mode", "live")
-        if mode == "live" and not settings.anthropic_api_key:
-            raise HTTPException(status_code=503, detail="The live model key has not been configured in Railway yet. Use fixture verification locally only.")
+        if mode == "live":
+            missing = []
+            if not settings.anthropic_api_key:
+                missing.append("ANTHROPIC_API_KEY")
+            if not settings.xai_api_key:
+                missing.append("XAI_API_KEY")
+            if missing:
+                raise HTTPException(status_code=503, detail="The live model key has not been configured in Railway yet. Use fixture verification locally only.")
         cycle = CycleManifest(cycle_id="cycle-" + uuid4().hex[:18], organisation_id=organisation_id, brand_id=brand_id, project_id=project_id, brief_sha256=repository.sha256_text(_brief(repository, project)), prompt_versions={"workflow": "pilot-v1"}, code_version=settings.code_version)
         repository.create_cycle(cycle)
-        selected = app.state.provider or (FixtureProvider() if mode == "fixture" else AnthropicProvider(settings.anthropic_api_key or ""))
+        if app.state.provider:
+            selected = app.state.provider
+        elif mode == "fixture":
+            selected = FixtureProvider()
+        else:
+            selected = LiveStrategyProvider(AnthropicProvider(settings.anthropic_api_key or ""), XaiProvider(settings.xai_api_key or "", settings.xai_model))
         task = asyncio.create_task(_run_cycle(app, selected, organisation_id, brand_id, project_id, cycle.cycle_id))
         task.add_done_callback(lambda __: app.state.running_cycles.discard(cycle.cycle_id))
         app.state.running_cycles.add(cycle.cycle_id)

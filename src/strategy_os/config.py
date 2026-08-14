@@ -15,6 +15,8 @@ class Settings:
     anthropic_api_key: Optional[str]
     app_env: str
     code_version: str
+    xai_api_key: Optional[str] = None
+    xai_model: str = "grok-4.6"
 
     @property
     def secure_cookie(self) -> bool:
@@ -28,4 +30,6 @@ class Settings:
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY") or None,
             app_env=os.environ.get("APP_ENV", "development"),
             code_version=os.environ.get("RAILWAY_GIT_COMMIT_SHA", "uncommitted"),
+            xai_api_key=os.environ.get("XAI_API_KEY") or None,
+            xai_model=os.environ.get("XAI_MODEL") or "grok-4.6",
         )
