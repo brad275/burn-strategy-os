@@ -125,3 +125,18 @@ class PilotAppTests(unittest.TestCase):
                 self.assertEqual(failure["detail"]["stage"], "source_collection")
                 self.assertIn("resumable search results", failure["detail"]["message"])
                 self.assertIn("start a new cycle", failure["detail"]["action"])
+
+    def test_delete_project_removes_it_from_the_homepage(self) -> None:
+        with TemporaryDirectory() as raw:
+            with TestClient(self.make_app(Path(raw))) as client:
+                self.login(client)
+                project = client.post("/api/projects", json={
+                    "name": "Pragmatic Play strategy pilot", "brand_name": "Pragmatic Play",
+                    "brief_markdown": "A detailed working brief used only to verify that a stale project can be removed from the homepage.",
+                    "mode": "fixture", "expected_revision": 0,
+                }).json()["project"]
+                path = "/api/projects/{}/{}/{}".format(project["organisation_id"], project["brand_id"], project["project_id"])
+                self.assertEqual(len(client.get("/api/projects").json()["items"]), 1)
+                self.assertEqual(client.delete(path).status_code, 200)
+                self.assertEqual(client.get("/api/projects").json()["items"], [])
+                self.assertEqual(client.get(path).status_code, 404)

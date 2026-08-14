@@ -12,6 +12,7 @@ from strategy_os import (
     ImmutableRecordError,
     MemoryChange,
     MemoryProposal,
+    NotFoundError,
     Project,
     QualityFinding,
     QualityResult,
@@ -63,6 +64,8 @@ class RepositoryTests(unittest.TestCase):
     def test_path_traversal_is_rejected(self):
         with self.assertRaises(ValidationError):
             self.repository.get_project("../private", "brand_test", "project_one")
+        with self.assertRaises(ValidationError):
+            self.repository.delete_project("../private", "brand_test", "project_one")
 
     def test_stage_attempt_is_immutable(self):
         attempt = StageAttempt(
@@ -261,6 +264,21 @@ class RepositoryTests(unittest.TestCase):
             self.repository.decide_memory_proposal(
                 "org_burn", "brand_test", "proposal_six", "actor_brad", ["change_six"], "decision_six", "memory_two"
             )
+
+    def test_active_project_cannot_be_deleted(self):
+        with self.assertRaises(ConflictError):
+            self.repository.delete_project("org_burn", "brand_test", "project_one")
+
+    def test_failed_project_can_be_deleted(self):
+        cycle = self.repository.update_cycle_status(
+            "org_burn", "brand_test", "project_one", "cycle_one", CycleStatus.RUNNING, 1
+        )
+        self.repository.update_cycle_status(
+            "org_burn", "brand_test", "project_one", "cycle_one", CycleStatus.FAILED, cycle.revision
+        )
+        self.repository.delete_project("org_burn", "brand_test", "project_one")
+        with self.assertRaises(NotFoundError):
+            self.repository.get_project("org_burn", "brand_test", "project_one")
 
 
 if __name__ == "__main__":

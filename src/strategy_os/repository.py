@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 from typing import Any, Dict, Iterable, List, Optional
@@ -91,6 +92,15 @@ class VaultRepository:
             path = self._project_dir(organisation_id, brand_id, project_id) / "project.json"
             self._atomic_write(path, self._json_bytes(updated.to_dict()))
             return updated
+
+    def delete_project(self, organisation_id: str, brand_id: str, project_id: str) -> None:
+        with self._lock:
+            project = self.get_project(organisation_id, brand_id, project_id)
+            if project.current_cycle_id and project.status == ProjectStatus.RUNNING:
+                active = self.get_cycle(organisation_id, brand_id, project_id, project.current_cycle_id)
+                if active.status in {CycleStatus.QUEUED, CycleStatus.RUNNING, CycleStatus.RECONCILING, CycleStatus.REVIEW}:
+                    raise ConflictError("cannot delete a project while a cycle is running")
+            shutil.rmtree(self._project_dir(organisation_id, brand_id, project_id))
 
     def create_cycle(self, cycle: CycleManifest) -> CycleManifest:
         cycle.validate()

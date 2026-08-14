@@ -144,6 +144,11 @@ def create_app(settings: Optional[Settings] = None, provider: Optional[StrategyP
         project = repository.get_project(organisation_id, brand_id, project_id)
         return _project_detail(repository, project)
 
+    @app.delete("/api/projects/{organisation_id}/{brand_id}/{project_id}")
+    def delete_project(organisation_id: str, brand_id: str, project_id: str, _: str = Depends(actor)) -> dict[str, Any]:
+        repository.delete_project(organisation_id, brand_id, project_id)
+        return {"deleted": True}
+
     @app.post("/api/projects/{organisation_id}/{brand_id}/{project_id}/cycles", status_code=202)
     async def create_cycle(organisation_id: str, brand_id: str, project_id: str, body: CycleCreate, _: str = Depends(actor)) -> dict[str, Any]:
         project = repository.get_project(organisation_id, brand_id, project_id)
