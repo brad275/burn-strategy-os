@@ -16,10 +16,10 @@ STAGE_MAX_TOKENS = {
     "research": 8000,
     "competitive": 8000,
     "audience": 8000,
-    "reconciliation": 4000,
+    "reconciliation": 6000,
     "strategy": 7000,
     "opportunities": 7000,
-    "document_assembly": 7000,
+    "document_assembly": 10000,
     "memory_proposal": 4000,
 }
 RESEARCH_SOURCE_LIMIT = 12
@@ -248,6 +248,14 @@ class AnthropicProvider:
                 "audience_portrait.summary: at most 60 words. each evidence.claim: at most 35 words.",
                 "sources must be compact records only: id, label, type, publication_date, accessed_date — only sources you cite.",
             ])
+        if stage_id == "reconciliation":
+            rules.extend([
+                "Return only the reconciliation object. Do not copy research, competitive, audience, or source records into the output.",
+                "coverage_map must use exactly these keys: market_position, competitive_landscape, cultural_tensions, audience_behavior, audience_tensions.",
+                "Values must be one of: strong, adequate, thin, missing.",
+                "Include at most 4 gap_alerts and at most 3 contradictions. Keep each note to 40 words.",
+                "If a gap is critical, include recommended_assumption. If a contradiction exists, name the agents.",
+            ])
         return rules
 
     @staticmethod
@@ -311,6 +319,23 @@ class AnthropicProvider:
             "audience_tensions": [{"name": "short name", "evidence": evidence}],
             "cultural_participation": {"platforms": ["platform"]},
             "sources": [source],
+        }
+
+    @staticmethod
+    def _reconciliation_output_schema() -> dict[str, Any]:
+        return {
+            "stage": "reconciliation",
+            "cycle_id": "from context",
+            "brand_slug": "from context",
+            "coverage_map": {
+                "market_position": "strong|adequate|thin|missing",
+                "competitive_landscape": "strong|adequate|thin|missing",
+                "cultural_tensions": "strong|adequate|thin|missing",
+                "audience_behavior": "strong|adequate|thin|missing",
+                "audience_tensions": "strong|adequate|thin|missing",
+            },
+            "gap_alerts": [{"impact": "critical|material|minor", "recommended_assumption": "<=40 words"}],
+            "contradictions": [{"agents": ["stage or source"], "note": "<=40 words"}],
         }
 
     @staticmethod
@@ -380,18 +405,74 @@ class AnthropicProvider:
         return {"competitors": competitors, "unowned_stories": stories}
 
     @staticmethod
+    def _compact_audience(audience: Any) -> dict[str, Any]:
+        if not isinstance(audience, dict):
+            return {}
+        portrait = audience.get("audience_portrait") if isinstance(audience.get("audience_portrait"), dict) else {}
+        participation = audience.get("cultural_participation") if isinstance(audience.get("cultural_participation"), dict) else {}
+        tensions = []
+        for item in audience.get("audience_tensions") or []:
+            if not isinstance(item, dict):
+                continue
+            evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+            tensions.append({"name": item.get("name"), "claim": _clip_text(evidence.get("claim"), COMPACT_TEXT_CHARS)})
+            if len(tensions) >= 3:
+                break
+        behaviors = portrait.get("behaviors") if isinstance(portrait.get("behaviors"), list) else []
+        communities = portrait.get("communities") if isinstance(portrait.get("communities"), list) else []
+        platforms = participation.get("platforms") if isinstance(participation.get("platforms"), list) else []
+        return {
+            "summary": _clip_text(portrait.get("summary"), 400),
+            "behaviors": behaviors[:5],
+            "communities": communities[:3],
+            "audience_tensions": tensions,
+            "platforms": platforms[:3],
+        }
+
+    @staticmethod
+    def _compact_reconciliation(reconciliation: Any) -> dict[str, Any]:
+        if not isinstance(reconciliation, dict):
+            return {}
+        coverage = reconciliation.get("coverage_map") if isinstance(reconciliation.get("coverage_map"), dict) else {}
+        gaps = []
+        for item in reconciliation.get("gap_alerts") or []:
+            if not isinstance(item, dict):
+                continue
+            gaps.append({
+                "impact": item.get("impact"),
+                "recommended_assumption": _clip_text(item.get("recommended_assumption"), COMPACT_TEXT_CHARS),
+            })
+            if len(gaps) >= 4:
+                break
+        contradictions = []
+        for item in reconciliation.get("contradictions") or []:
+            if not isinstance(item, dict):
+                continue
+            contradictions.append({"agents": item.get("agents"), "note": _clip_text(item.get("note"), COMPACT_TEXT_CHARS)})
+            if len(contradictions) >= 3:
+                break
+        return {"coverage_map": coverage, "gap_alerts": gaps, "contradictions": contradictions}
+
+    @staticmethod
     def _context_for_stage(stage_id: str, context: dict[str, Any]) -> dict[str, Any]:
-        if stage_id not in {"research", "competitive", "audience"}:
+        if stage_id not in {"research", "competitive", "audience", "reconciliation", "strategy", "opportunities", "document_assembly", "memory_proposal"}:
             return context
         compact = {
             "cycle_id": context.get("cycle_id"),
             "brand_slug": context.get("brand_slug"),
             "collected_sources": AnthropicProvider._compact_sources(context),
         }
-        if stage_id in {"competitive", "audience"}:
+        if stage_id in {"competitive", "audience", "reconciliation", "strategy", "opportunities", "document_assembly", "memory_proposal"}:
             compact["research"] = AnthropicProvider._compact_research(context.get("research"))
-        if stage_id == "audience":
+        if stage_id in {"audience", "reconciliation", "strategy", "opportunities", "document_assembly", "memory_proposal"}:
             compact["competitive"] = AnthropicProvider._compact_competitive(context.get("competitive"))
+        if stage_id in {"reconciliation", "strategy", "opportunities", "document_assembly", "memory_proposal"}:
+            compact["audience"] = AnthropicProvider._compact_audience(context.get("audience"))
+        if stage_id in {"strategy", "opportunities", "document_assembly", "memory_proposal"}:
+            compact["reconciliation"] = AnthropicProvider._compact_reconciliation(context.get("reconciliation"))
+            compact["coverage_map"] = context.get("coverage_map") or compact["reconciliation"].get("coverage_map", {})
+        if stage_id == "memory_proposal":
+            compact["full_document_word_count"] = context.get("full_document_word_count")
         return compact
 
 
@@ -414,6 +495,7 @@ def build_generate_prompt(stage_id: str, brief: str, context: dict[str, Any], re
         "research": AnthropicProvider._research_output_schema,
         "competitive": AnthropicProvider._competitive_output_schema,
         "audience": AnthropicProvider._audience_output_schema,
+        "reconciliation": AnthropicProvider._reconciliation_output_schema,
     }
     builder = schemas.get(stage_id)
     if builder:

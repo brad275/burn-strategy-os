@@ -185,7 +185,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertIn("copy the research object wholesale", joined_rules)
         self.assertEqual(prompt["output_schema"]["competitors"][0]["structural_limitation"], "<=40 words")
 
-    def test_later_stage_keeps_full_context_and_its_token_limit(self):
+    def test_reconciliation_prompt_is_compact_and_uses_stage_token_limit(self):
         captured = {}
 
         def fake_request(prompt, max_tokens, use_web_search):
@@ -194,11 +194,20 @@ class AnthropicProviderTests(unittest.TestCase):
             return {"stage": "reconciliation"}
 
         self.provider._request = fake_request
-        context = {"cycle_id": "cycle-1", "brand_slug": "pragmatic-play", "research": {"body": "kept"}}
-        self.provider.generate("reconciliation", "A working brief.", context, 1)
+        result = self.provider.generate("reconciliation", "A working brief.", {
+            "cycle_id": "cycle-1",
+            "brand_slug": "pragmatic-play",
+            "research": {"body": "A long research essay that must not be copied wholesale.", "market_position": {"summary": "Position"}},
+            "competitive": {"competitors": [{"name": "One", "structural_limitation": "A distinct limitation"}]},
+            "audience": {"audience_portrait": {"summary": "People seek meaningful, shareable participation.", "behaviors": ["one", "two", "three"]}},
+        }, 1)
+        self.assertEqual(result, {"stage": "reconciliation"})
         self.assertEqual(captured["max_tokens"], STAGE_MAX_TOKENS["reconciliation"])
-        self.assertEqual(captured["prompt"]["context"], context)
-        self.assertNotIn("output_schema", captured["prompt"])
+        prompt = captured["prompt"]
+        self.assertNotIn("body", prompt["context"]["research"])
+        self.assertEqual(prompt["context"]["competitive"]["competitors"][0]["name"], "One")
+        self.assertIn("do not copy research", " ".join(prompt["rules"]).lower())
+        self.assertEqual(prompt["output_schema"]["stage"], "reconciliation")
 
     def test_source_collection_keeps_its_token_limit(self):
         captured = {}
