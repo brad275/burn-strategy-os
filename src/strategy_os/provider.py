@@ -10,6 +10,20 @@ from urllib.request import Request, urlopen
 
 
 REQUEST_TIMEOUT_SECONDS = 240
+SOURCE_COLLECTION_MAX_TOKENS = 6000
+DEFAULT_STAGE_MAX_TOKENS = 7000
+STAGE_MAX_TOKENS = {
+    "research": 8000,
+    "competitive": 7000,
+    "audience": 7000,
+    "reconciliation": 4000,
+    "strategy": 7000,
+    "opportunities": 7000,
+    "document_assembly": 7000,
+    "memory_proposal": 4000,
+}
+RESEARCH_SOURCE_LIMIT = 12
+RESEARCH_EXCERPT_CHARS = 240
 
 
 class ProviderError(RuntimeError):
@@ -34,15 +48,12 @@ class AnthropicProvider:
             "stage": stage_id,
             "revision": revision,
             "brief": brief,
-            "context": context,
-            "rules": [
-                "Return only valid JSON, with no markdown fences.",
-                "Use only factual claims that cite evidence and a source in the supplied context.",
-                "Label deductions as inference and gaps as assumptions.",
-                "Never mention AI, agents, systems, or automation in client-facing strategy copy.",
-            ],
+            "context": self._context_for_stage(stage_id, context),
+            "rules": self._rules_for_stage(stage_id),
         }
-        return self._request(json.dumps(prompt), 7000, use_web_search=False)
+        if stage_id == "research":
+            prompt["output_schema"] = self._research_output_schema()
+        return self._request(json.dumps(prompt), STAGE_MAX_TOKENS.get(stage_id, DEFAULT_STAGE_MAX_TOKENS), use_web_search=False)
 
     def collect_sources(self, brief: str, context: dict[str, Any]) -> list[dict[str, Any]]:
         prompt = {
@@ -55,7 +66,7 @@ class AnthropicProvider:
                 "Never invent a URL, date, publisher, quote, or source. Omit anything you cannot verify.",
             ],
         }
-        result = self._request(json.dumps(prompt), 6000, use_web_search=True)
+        result = self._request(json.dumps(prompt), SOURCE_COLLECTION_MAX_TOKENS, use_web_search=True)
         sources = result.get("sources")
         if not isinstance(sources, list) or len(sources) < 3:
             raise ProviderError("Source research returned too little verified material; revise the brief or try again.")
@@ -210,6 +221,85 @@ class AnthropicProvider:
         if best_result is not None:
             return best_result
         raise original_error
+
+    @staticmethod
+    def _rules_for_stage(stage_id: str) -> list[str]:
+        rules = [
+            "Return only valid JSON, with no markdown fences.",
+            "Use only factual claims that cite evidence and a source in the supplied context.",
+            "Label deductions as inference and gaps as assumptions.",
+            "Never mention AI, agents, systems, or automation in client-facing strategy copy.",
+        ]
+        if stage_id == "research":
+            rules.extend([
+                "Keep every summary, claim, excerpt, and body concise; do not write long essays.",
+                "Cite collected_sources by id. Do not repeat full source records, URLs, publishers, or long excerpts.",
+                "Include 2–3 cultural tensions, 3–5 signals, and 1–3 market-position data points.",
+                "market_position.summary: at most 60 words. body: at most 180 words. each evidence.claim: at most 35 words.",
+                "sources must be compact records only: id, label, type, publication_date, accessed_date — only sources you cite.",
+                "Do not copy collected_sources wholesale into the output.",
+            ])
+        return rules
+
+    @staticmethod
+    def _research_output_schema() -> dict[str, Any]:
+        evidence = {
+            "id": "evidence-...",
+            "claim": "<=35 words",
+            "source_ref": "collected source id",
+            "date_of_evidence": "YYYY-MM-DD",
+            "confidence": "verified|likely|unverified",
+            "freshness": "current|recent|historical",
+        }
+        source = {
+            "id": "source-...",
+            "label": "short label",
+            "type": "report|article|social|earnings|campaign|interview|data|other",
+            "publication_date": "YYYY-MM-DD",
+            "accessed_date": "YYYY-MM-DD",
+        }
+        return {
+            "stage": "research",
+            "cycle_id": "from context",
+            "brand_slug": "from context",
+            "revision": 1,
+            "market_position": {"summary": "<=60 words", "data_points": [evidence]},
+            "cultural_tensions": [{"name": "short name", "evidence": evidence}],
+            "signals": [evidence],
+            "body": "<=180 words",
+            "sources": [source],
+        }
+
+    @staticmethod
+    def _context_for_stage(stage_id: str, context: dict[str, Any]) -> dict[str, Any]:
+        if stage_id != "research":
+            return context
+        collected = context.get("source_collection") if isinstance(context.get("source_collection"), dict) else {}
+        compact: list[dict[str, Any]] = []
+        raw_sources = collected.get("sources") if isinstance(collected.get("sources"), list) else []
+        for source in raw_sources:
+            if not isinstance(source, dict):
+                continue
+            excerpt = source.get("excerpt")
+            if isinstance(excerpt, str) and len(excerpt) > RESEARCH_EXCERPT_CHARS:
+                excerpt = excerpt[:RESEARCH_EXCERPT_CHARS].rstrip() + "…"
+            compact.append({
+                "id": source.get("id"),
+                "label": source.get("label"),
+                "title": source.get("title"),
+                "publisher": source.get("publisher"),
+                "type": source.get("type"),
+                "publication_date": source.get("publication_date"),
+                "accessed_date": source.get("accessed_date"),
+                "excerpt": excerpt,
+            })
+            if len(compact) >= RESEARCH_SOURCE_LIMIT:
+                break
+        return {
+            "cycle_id": context.get("cycle_id"),
+            "brand_slug": context.get("brand_slug"),
+            "collected_sources": compact,
+        }
 
 
 class FixtureProvider:
