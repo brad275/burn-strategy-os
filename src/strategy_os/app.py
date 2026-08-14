@@ -121,7 +121,9 @@ def create_app(settings: Optional[Settings] = None, provider: Optional[StrategyP
         return response
 
     @app.get("/", response_class=HTMLResponse)
-    def home(_: str = Depends(actor)) -> FileResponse:
+    def home(request: Request) -> Response:
+        if not read_cookie(settings.app_access_token, request.cookies.get(COOKIE_NAME)):
+            return RedirectResponse("/login", status_code=303)
         return FileResponse(static_dir / "index.html")
 
     @app.get("/api/projects")

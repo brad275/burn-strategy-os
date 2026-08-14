@@ -26,6 +26,7 @@ class PilotAppTests(unittest.TestCase):
                 self.assertEqual(client.get("/health").status_code, 200)
                 self.assertNotIn("test-access-token", client.get("/health").text)
                 self.assertEqual(client.get("/api/projects").status_code, 401)
+                self.assertEqual(client.get("/", follow_redirects=False).status_code, 303)
                 self.assertEqual(client.post("/login", data={"access_token": "wrong"}).status_code, 401)
 
     def test_fixture_cycle_persists_document_and_memory_proposal(self) -> None:
@@ -76,4 +77,3 @@ class PilotAppTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 503)
                 self.assertIn("not been configured", response.json()["detail"])
-
