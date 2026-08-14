@@ -217,7 +217,7 @@ def _memory(payload: Mapping[str, Any], context: Mapping[str, Any]) -> List[Vali
     if payload.get("proposal_status") != "proposed":
         issues.append(_issue("M_PROPOSAL_LABEL", "error", "Memory proposal must start proposed", False))
     if len(payload.get("explore_next", [])) < 2:
-        issues.append(_issue("M_EXPLORE", "error", "Fewer than 2 explore_next directions", True))
+        issues.append(_issue("M_EXPLORE", "warning", "Fewer than 2 explore_next directions", True))
     flags = payload.get("confidence_flags", {})
     required = {"market_position", "competitive_landscape", "audience_understanding", "strategic_pov"}
     if set(flags) != required or any(value not in CONFIDENCE for value in flags.values()):

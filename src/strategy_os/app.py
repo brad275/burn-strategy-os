@@ -320,7 +320,7 @@ def _memory_proposals(repository: VaultRepository, organisation_id: str, brand_i
 
 def _login_html(error: str = "") -> str:
     message = f'<p class="error">{error}</p>' if error else ""
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>BURN Strategy OS</title><link rel="stylesheet" href="/static/style.css"></head><body class="login"><main><p class="eyebrow">PRIVATE PILOT</p><h1>BURN Strategy OS.</h1><p>Enter the private access token to continue.</p>{message}<form method="post"><label>ACCESS TOKEN<input name="access_token" type="password" autocomplete="current-password" required></label><button>Enter Strategy OS</button></form></main></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>BURN Strategy OS</title><link rel="stylesheet" href="/static/style.css"></head><body class="login"><main><p class="eyebrow">PRIVATE PILOT</p><img class="burn-logo login-logo" src="/static/burn-logo-black.png" alt="Burn"><h1>Strategy OS.</h1><p>Enter the private access token to continue.</p>{message}<form method="post"><label>ACCESS TOKEN<input name="access_token" type="password" autocomplete="current-password" required></label><button>Enter Strategy OS</button></form></main></body></html>'''
 
 
 app = create_app()

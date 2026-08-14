@@ -243,6 +243,37 @@ class XaiProviderTests(unittest.TestCase):
             result = self.provider._request("original prompt", 8000)
         return result, mocked
 
+    def test_memory_prompt_is_compact(self):
+        captured = {}
+
+        def fake_request(prompt, max_tokens):
+            captured["prompt"] = json.loads(prompt)
+            captured["max_tokens"] = max_tokens
+            return {"stage": "memory_proposal"}
+
+        self.provider._request = fake_request
+        long_doc = "word " * 400
+        result = self.provider.generate("memory_proposal", "A working brief. " * 80, {
+            "cycle_id": "cycle-1",
+            "brand_slug": "pragmatic-play",
+            "source_collection": {"sources": [{"id": "source-1", "url": "https://example.com", "excerpt": "long"}]},
+            "research": {"body": "A long research essay that must not enter memory context."},
+            "strategy": {"big_idea": {"name": "Make Each Moment Matter"}, "markdown": "A long strategy essay. " * 40},
+            "document_assembly": {"markdown": long_doc, "full_document_word_count": 400},
+            "coverage_map": {"market_position": "adequate"},
+        }, 1)
+        self.assertEqual(result, {"stage": "memory_proposal"})
+        self.assertEqual(captured["max_tokens"], STAGE_MAX_TOKENS["memory_proposal"])
+        prompt = captured["prompt"]
+        self.assertNotIn("collected_sources", prompt["context"])
+        self.assertNotIn("research", prompt["context"])
+        self.assertNotIn("source_collection", prompt["context"])
+        self.assertEqual(prompt["context"]["big_idea"], "Make Each Moment Matter")
+        self.assertLessEqual(len(prompt["context"]["document_excerpt"]), 401)
+        self.assertLessEqual(len(prompt["brief"]), 481)
+        self.assertEqual(prompt["output_schema"]["proposal_status"], "proposed")
+        self.assertIn("not a strategy essay", " ".join(prompt["rules"]).lower())
+
     def test_json_object_and_research_token_limit(self):
         captured = {}
 

@@ -20,7 +20,7 @@ STAGE_MAX_TOKENS = {
     "strategy": 8000,
     "opportunities": 8000,
     "document_assembly": 12000,
-    "memory_proposal": 4000,
+    "memory_proposal": 5000,
 }
 MARKDOWN_STAGES = frozenset({"strategy", "opportunities", "document_assembly"})
 RESEARCH_SOURCE_LIMIT = 12
@@ -257,6 +257,16 @@ class AnthropicProvider:
                 "Include at most 4 gap_alerts and at most 3 contradictions. Keep each note to 40 words.",
                 "If a gap is critical, include recommended_assumption. If a contradiction exists, name the agents.",
             ])
+        if stage_id == "memory_proposal":
+            rules.extend([
+                "This is a compact memory record, not a strategy essay. Do not copy the document or strategy markdown.",
+                "proposal_status must be proposed.",
+                "Include 1–4 changes. Each content field: at most 80 words. evidence_ids must be existing claim ids.",
+                "explore_next: exactly 2 short directions, each at most 20 words.",
+                "confidence_flags keys: market_position, competitive_landscape, audience_understanding, strategic_pov. Values: high, medium, or low. Do not set all four to high.",
+                "total_word_count is the word count of all change content plus explore_next. It must be far below full_document_word_count.",
+                "diffs may be an empty list if there is no approved memory yet.",
+            ])
         return rules
 
     @staticmethod
@@ -337,6 +347,31 @@ class AnthropicProvider:
             },
             "gap_alerts": [{"impact": "critical|material|minor", "recommended_assumption": "<=40 words"}],
             "contradictions": [{"agents": ["stage or source"], "note": "<=40 words"}],
+        }
+
+    @staticmethod
+    def _memory_output_schema() -> dict[str, Any]:
+        return {
+            "stage": "memory_proposal",
+            "cycle_id": "from context",
+            "brand_slug": "from context",
+            "proposal_status": "proposed",
+            "changes": [{
+                "change_id": "change-...",
+                "operation": "add|amend|supersede",
+                "section": "market_position|competitive_landscape|audience_understanding|strategic_pov",
+                "content": "<=80 words",
+                "evidence_ids": ["claim-id"],
+            }],
+            "explore_next": ["<=20 words", "<=20 words"],
+            "confidence_flags": {
+                "market_position": "high|medium|low",
+                "competitive_landscape": "high|medium|low",
+                "audience_understanding": "high|medium|low",
+                "strategic_pov": "high|medium|low",
+            },
+            "total_word_count": 40,
+            "diffs": [],
         }
 
     @staticmethod
@@ -456,26 +491,36 @@ class AnthropicProvider:
 
     @staticmethod
     def _context_for_stage(stage_id: str, context: dict[str, Any]) -> dict[str, Any]:
-        if stage_id not in {"research", "competitive", "audience", "reconciliation", "strategy", "opportunities", "document_assembly", "memory_proposal"}:
+        if stage_id == "memory_proposal":
+            strategy = context.get("strategy") if isinstance(context.get("strategy"), dict) else {}
+            document = context.get("document_assembly") if isinstance(context.get("document_assembly"), dict) else {}
+            reconciliation = context.get("reconciliation") if isinstance(context.get("reconciliation"), dict) else {}
+            idea = strategy.get("big_idea") if isinstance(strategy.get("big_idea"), dict) else {}
+            return {
+                "cycle_id": context.get("cycle_id"),
+                "brand_slug": context.get("brand_slug"),
+                "coverage_map": context.get("coverage_map") or reconciliation.get("coverage_map") or {},
+                "big_idea": idea.get("name"),
+                "strategy_excerpt": _clip_text(strategy.get("markdown") or strategy.get("body"), 400),
+                "document_excerpt": _clip_text(document.get("markdown") or document.get("full_document"), 400),
+                "full_document_word_count": context.get("full_document_word_count") or document.get("full_document_word_count"),
+            }
+        if stage_id not in {"research", "competitive", "audience", "reconciliation", "strategy", "opportunities", "document_assembly"}:
             return context
         compact = {
             "cycle_id": context.get("cycle_id"),
             "brand_slug": context.get("brand_slug"),
             "collected_sources": AnthropicProvider._compact_sources(context),
         }
-        if stage_id in {"competitive", "audience", "reconciliation", "strategy", "opportunities", "document_assembly", "memory_proposal"}:
+        if stage_id in {"competitive", "audience", "reconciliation", "strategy", "opportunities", "document_assembly"}:
             compact["research"] = AnthropicProvider._compact_research(context.get("research"))
-        if stage_id in {"audience", "reconciliation", "strategy", "opportunities", "document_assembly", "memory_proposal"}:
+        if stage_id in {"audience", "reconciliation", "strategy", "opportunities", "document_assembly"}:
             compact["competitive"] = AnthropicProvider._compact_competitive(context.get("competitive"))
-        if stage_id in {"reconciliation", "strategy", "opportunities", "document_assembly", "memory_proposal"}:
+        if stage_id in {"reconciliation", "strategy", "opportunities", "document_assembly"}:
             compact["audience"] = AnthropicProvider._compact_audience(context.get("audience"))
-        if stage_id in {"strategy", "opportunities", "document_assembly", "memory_proposal"}:
+        if stage_id in {"strategy", "opportunities", "document_assembly"}:
             compact["reconciliation"] = AnthropicProvider._compact_reconciliation(context.get("reconciliation"))
             compact["coverage_map"] = context.get("coverage_map") or compact["reconciliation"].get("coverage_map", {})
-        if stage_id == "memory_proposal":
-            document = context.get("document_assembly") if isinstance(context.get("document_assembly"), dict) else {}
-            compact["full_document_word_count"] = context.get("full_document_word_count") or document.get("full_document_word_count")
-            compact["document_excerpt"] = _clip_text(document.get("markdown") or document.get("full_document"), 900)
         return compact
 
 
@@ -490,7 +535,7 @@ def build_generate_prompt(stage_id: str, brief: str, context: dict[str, Any], re
         "role": "BURN Strategy OS evidence-led strategist",
         "stage": stage_id,
         "revision": revision,
-        "brief": brief,
+        "brief": _clip_text(brief, 480) if stage_id == "memory_proposal" else brief,
         "context": AnthropicProvider._context_for_stage(stage_id, context),
         "rules": AnthropicProvider._rules_for_stage(stage_id),
     }
@@ -499,6 +544,7 @@ def build_generate_prompt(stage_id: str, brief: str, context: dict[str, Any], re
         "competitive": AnthropicProvider._competitive_output_schema,
         "audience": AnthropicProvider._audience_output_schema,
         "reconciliation": AnthropicProvider._reconciliation_output_schema,
+        "memory_proposal": AnthropicProvider._memory_output_schema,
     }
     builder = schemas.get(stage_id)
     if builder:
