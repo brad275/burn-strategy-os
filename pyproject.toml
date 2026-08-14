@@ -7,6 +7,13 @@ name = "burn-strategy-os"
 version = "0.1.0"
 description = "Filesystem-first foundation for BURN Strategy OS"
 requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "uvicorn>=0.30,<1.0",
+  "jinja2>=3.1,<4.0",
+  "pydantic>=2.7,<3.0",
+  "python-multipart>=0.0.18,<1.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
