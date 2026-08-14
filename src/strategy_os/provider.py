@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -58,18 +59,46 @@ class AnthropicProvider:
         return sources
 
     def _request(self, prompt: str, max_tokens: int, use_web_search: bool) -> dict[str, Any]:
+        original_messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
         request_payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
             "temperature": 0.2,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": original_messages,
         }
         if use_web_search:
             request_payload["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]
-        body = json.dumps(request_payload).encode()
+        payload = self._post(request_payload, source_research=use_web_search)
+        for _ in range(3):
+            if payload.get("stop_reason") != "pause_turn":
+                break
+            if not use_web_search:
+                raise ProviderError("The model paused unexpectedly before completing this stage.")
+            content = payload.get("content")
+            if not isinstance(content, list) or not content:
+                raise ProviderError("Source research paused without resumable search results.")
+            # Anthropic server tools require the paused assistant response verbatim,
+            # together with the complete original user turn and unchanged tools.
+            request_payload["messages"] = original_messages + [{"role": "assistant", "content": content}]
+            payload = self._post(request_payload, source_research=True)
+        if payload.get("stop_reason") == "pause_turn":
+            raise ProviderError("Source research did not finish after several search continuations; try again.")
+        self._validate_response(payload)
+        text = self._extract_text(payload)
+        if not text.strip():
+            raise ProviderError("The model completed without returning structured text; try the cycle again.")
+        try:
+            result = json.loads(self._unwrap_json_fence(text))
+        except json.JSONDecodeError as exc:
+            raise ProviderError("The model returned text that was not valid structured JSON; try the cycle again.") from exc
+        if not isinstance(result, dict):
+            raise ProviderError("The model returned an unexpected structured result instead of a JSON object.")
+        return result
+
+    def _post(self, request_payload: dict[str, Any], source_research: bool) -> dict[str, Any]:
         request = Request(
             "https://api.anthropic.com/v1/messages",
-            data=body,
+            data=json.dumps(request_payload).encode(),
             headers={
                 "content-type": "application/json",
                 "x-api-key": self.api_key,
@@ -79,22 +108,65 @@ class AnthropicProvider:
         )
         try:
             with urlopen(request, timeout=90) as response:
-                payload = json.loads(response.read().decode())
-        except (HTTPError, URLError, TimeoutError) as exc:
-            raise ProviderError("The model provider could not complete this stage.") from exc
-        if payload.get("stop_reason") == "pause_turn" and use_web_search:
-            request_payload["messages"].append({"role": "assistant", "content": payload.get("content", [])})
-            body = json.dumps(request_payload).encode()
-            try:
-                with urlopen(Request("https://api.anthropic.com/v1/messages", data=body, headers={"content-type": "application/json", "x-api-key": self.api_key, "anthropic-version": "2023-06-01"}, method="POST"), timeout=90) as response:
-                    payload = json.loads(response.read().decode())
-            except (HTTPError, URLError, TimeoutError) as exc:
-                raise ProviderError("The model provider could not complete source research.") from exc
-        text = "".join(block.get("text", "") for block in payload.get("content", []) if block.get("type") == "text")
+                raw = response.read().decode()
+        except HTTPError as exc:
+            raise ProviderError(self._http_failure(exc.code)) from exc
+        except (URLError, TimeoutError) as exc:
+            activity = "source research" if source_research else "this strategy stage"
+            raise ProviderError("The model provider could not complete %s because the connection failed; try again." % activity) from exc
         try:
-            return json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ProviderError("The model returned an invalid structured result.") from exc
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ProviderError("The model provider returned an unreadable response; try again.") from exc
+        if not isinstance(payload, dict):
+            raise ProviderError("The model provider returned an unexpected response shape; try again.")
+        return payload
+
+    @staticmethod
+    def _http_failure(status: int) -> str:
+        if status in {401, 403}:
+            return "The model provider rejected authentication; check the configured Railway API key."
+        if status == 429:
+            return "The model provider rate limit was reached; wait briefly and try again."
+        if status >= 500:
+            return "The model provider is temporarily unavailable; try again shortly."
+        return "The model provider rejected the request (HTTP %d); review the stage configuration." % status
+
+    @staticmethod
+    def _validate_response(payload: dict[str, Any]) -> None:
+        if payload.get("type") == "error" or isinstance(payload.get("error"), dict):
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+            error_type = error.get("type") if isinstance(error.get("type"), str) else "provider_error"
+            raise ProviderError("The model provider returned an API error (%s); try again or review the provider configuration." % error_type)
+        stop_reason = payload.get("stop_reason")
+        if stop_reason == "refusal":
+            raise ProviderError("The model declined this request; review the brief wording before trying again.")
+        if stop_reason in {"max_tokens", "model_context_window_exceeded"}:
+            raise ProviderError("The model response was cut off before the structured result was complete; reduce the brief or raise the output limit.")
+        if stop_reason not in {"end_turn", "stop_sequence"}:
+            label = stop_reason if isinstance(stop_reason, str) else "missing"
+            raise ProviderError("The model returned an unexpected completion state (%s); try again." % label)
+        if not isinstance(payload.get("content"), list):
+            raise ProviderError("The model response did not contain a valid content list; try again.")
+
+    @staticmethod
+    def _extract_text(payload: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for block in payload["content"]:
+            if not isinstance(block, dict):
+                raise ProviderError("The model response contained an unexpected content block; try again.")
+            if block.get("type") == "text":
+                value = block.get("text")
+                if not isinstance(value, str):
+                    raise ProviderError("The model response contained an invalid text block; try again.")
+                parts.append(value)
+        return "".join(parts)
+
+    @staticmethod
+    def _unwrap_json_fence(text: str) -> str:
+        stripped = text.strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", stripped, flags=re.IGNORECASE)
+        return fenced.group(1).strip() if fenced else stripped
 
 
 class FixtureProvider:

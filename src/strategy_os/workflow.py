@@ -13,7 +13,7 @@ from .models import (
     CycleStatus, MemoryChange, MemoryOperation, MemoryProposal, QualityFinding,
     QualityResult, StageAttempt, StageAttemptStatus,
 )
-from .provider import StrategyProvider
+from .provider import ProviderError, StrategyProvider
 from .repository import VaultRepository
 from .semantic import validate_stage_output
 
@@ -31,18 +31,22 @@ class WorkflowRunner:
         if cycle.status == CycleStatus.QUEUED:
             cycle = self.repository.update_cycle_status(organisation_id, brand_id, project_id, cycle_id, CycleStatus.RUNNING, cycle.revision)
         project_dir = self.repository.root / "organisations" / organisation_id / "brands" / brand_id / "projects" / project_id
-        brief = (project_dir / "brief.md").read_text(encoding="utf-8")
         context: dict[str, Any] = {"cycle_id": cycle_id, "brand_slug": brand_id}
+        active_stage = "source_collection"
         try:
+            brief = (project_dir / "brief.md").read_text(encoding="utf-8")
             self._source_collection(organisation_id, brand_id, project_id, cycle_id, brief, context)
             for stage in ("research", "competitive", "audience"):
+                active_stage = stage
                 context[stage] = self._execute_stage(organisation_id, brand_id, project_id, cycle_id, stage, brief, context)
             cycle = self.repository.get_cycle(organisation_id, brand_id, project_id, cycle_id)
             if cycle.status == CycleStatus.RUNNING:
                 cycle = self.repository.update_cycle_status(organisation_id, brand_id, project_id, cycle_id, CycleStatus.RECONCILING, cycle.revision)
-            context["reconciliation"] = self._execute_stage(organisation_id, brand_id, project_id, cycle_id, "reconciliation", brief, context)
+            active_stage = "reconciliation"
+            context["reconciliation"] = self._execute_stage(organisation_id, brand_id, project_id, cycle_id, active_stage, brief, context)
             context["coverage_map"] = context["reconciliation"].get("coverage_map", {})
             for stage in ("strategy", "opportunities", "document_assembly", "memory_proposal"):
+                active_stage = stage
                 context[stage] = self._execute_stage(organisation_id, brand_id, project_id, cycle_id, stage, brief, context)
                 if stage == "document_assembly":
                     context["full_document_word_count"] = context[stage].get("full_document_word_count")
@@ -55,7 +59,12 @@ class WorkflowRunner:
             cycle = self.repository.get_cycle(organisation_id, brand_id, project_id, cycle_id)
             if cycle.status not in {CycleStatus.COMPLETED, CycleStatus.FAILED}:
                 self.repository.update_cycle_status(organisation_id, brand_id, project_id, cycle_id, CycleStatus.FAILED, cycle.revision)
-            self._write_event(organisation_id, brand_id, project_id, cycle_id, "workflow_failed", {"message": str(exc)[:200]})
+            message = str(exc) if isinstance(exc, ProviderError) else "The cycle stopped during %s because an unexpected internal error occurred." % active_stage.replace("_", " ")
+            self._write_event(organisation_id, brand_id, project_id, cycle_id, "workflow_failed", {
+                "stage": active_stage,
+                "message": message[:500],
+                "action": "Review this reason, adjust the brief or provider configuration if indicated, then start a new cycle.",
+            })
             raise
 
     def _source_collection(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, brief: str, context: dict[str, Any]) -> None:

@@ -9,7 +9,12 @@ from fastapi.testclient import TestClient
 
 from strategy_os.app import create_app
 from strategy_os.config import Settings
-from strategy_os.provider import FixtureProvider
+from strategy_os.provider import FixtureProvider, ProviderError
+
+
+class FailingProvider(FixtureProvider):
+    def collect_sources(self, brief, context):
+        raise ProviderError("Source research paused without resumable search results.")
 
 
 class PilotAppTests(unittest.TestCase):
@@ -77,3 +82,29 @@ class PilotAppTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 503)
                 self.assertIn("not been configured", response.json()["detail"])
+
+    def test_failed_cycle_exposes_safe_ledger_reason(self) -> None:
+        with TemporaryDirectory() as raw:
+            app = create_app(Settings(Path(raw), "test-access-token", "configured", "test", "test-sha"), FailingProvider())
+            with TestClient(app) as client:
+                self.login(client)
+                project = client.post("/api/projects", json={
+                    "name": "Pragmatic Play strategy pilot", "brand_name": "Pragmatic Play",
+                    "brief_markdown": "A detailed working brief for testing a safely reported live provider failure in the cycle ledger.",
+                    "mode": "live", "expected_revision": 0,
+                }).json()["project"]
+                started = client.post(
+                    "/api/projects/{}/{}/{}/cycles".format(project["organisation_id"], project["brand_id"], project["project_id"]),
+                    json={"expected_revision": 1, "mode": "live"},
+                ).json()["cycle"]
+                path = "/api/cycles/{}/{}/{}/{}".format(project["organisation_id"], project["brand_id"], project["project_id"], started["cycle_id"])
+                for _ in range(30):
+                    status = client.get(path).json()
+                    if status["cycle"]["status"] == "failed":
+                        break
+                    time.sleep(0.05)
+                failure = status["ledger"][-1]
+                self.assertEqual(failure["event"], "workflow_failed")
+                self.assertEqual(failure["detail"]["stage"], "source_collection")
+                self.assertIn("resumable search results", failure["detail"]["message"])
+                self.assertIn("start a new cycle", failure["detail"]["action"])

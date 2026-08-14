@@ -1,0 +1,79 @@
+"""Anthropic response-shape and continuation handling."""
+
+import json
+import unittest
+from unittest.mock import patch
+
+from strategy_os.provider import AnthropicProvider, ProviderError
+
+
+class _Response:
+    def __init__(self, payload):
+        self.body = json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return None
+
+    def read(self):
+        return self.body
+
+
+class AnthropicProviderTests(unittest.TestCase):
+    def setUp(self):
+        self.provider = AnthropicProvider("test-key")
+
+    def request(self, *payloads):
+        with patch("strategy_os.provider.urlopen", side_effect=[_Response(item) for item in payloads]) as mocked:
+            result = self.provider._request("original prompt", 100, use_web_search=True)
+        return result, mocked
+
+    def test_normal_json_text(self):
+        result, _ = self.request({"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": '{"sources": []}'}]})
+        self.assertEqual(result, {"sources": []})
+
+    def test_fenced_json_text(self):
+        result, _ = self.request({"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": '```json\n{"sources": []}\n```'}]})
+        self.assertEqual(result, {"sources": []})
+
+    def test_pause_turn_then_completion_preserves_original_turn(self):
+        paused_content = [
+            {"type": "server_tool_use", "id": "srv-1", "name": "web_search", "input": {"query": "example"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srv-1", "content": []},
+        ]
+        result, mocked = self.request(
+            {"type": "message", "stop_reason": "pause_turn", "content": paused_content},
+            {"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": '{"sources": []}'}]},
+        )
+        self.assertEqual(result, {"sources": []})
+        continued = json.loads(mocked.call_args_list[1].args[0].data.decode())
+        self.assertEqual(continued["messages"], [
+            {"role": "user", "content": "original prompt"},
+            {"role": "assistant", "content": paused_content},
+        ])
+        self.assertEqual(continued["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}])
+
+    def test_empty_output(self):
+        with self.assertRaisesRegex(ProviderError, "without returning structured text"):
+            self.request({"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": "  "}]})
+
+    def test_refusal_and_error_payloads(self):
+        cases = [
+            ({"type": "message", "stop_reason": "refusal", "content": []}, "declined"),
+            ({"type": "error", "error": {"type": "overloaded_error", "message": "internal detail"}}, "overloaded_error"),
+        ]
+        for payload, reason in cases:
+            with self.subTest(reason=reason), self.assertRaisesRegex(ProviderError, reason):
+                self.request(payload)
+
+    def test_max_tokens_and_unexpected_shape(self):
+        with self.assertRaisesRegex(ProviderError, "cut off"):
+            self.request({"type": "message", "stop_reason": "max_tokens", "content": [{"type": "text", "text": "{"}]})
+        with self.assertRaisesRegex(ProviderError, "content list"):
+            self.request({"type": "message", "stop_reason": "end_turn", "content": {}})
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -201,7 +201,12 @@ def create_app(settings: Optional[Settings] = None, provider: Optional[StrategyP
 
 
 async def _run_cycle(app: FastAPI, provider: StrategyProvider, organisation_id: str, brand_id: str, project_id: str, cycle_id: str) -> None:
-    await asyncio.to_thread(WorkflowRunner(app.state.repository, provider).run, organisation_id, brand_id, project_id, cycle_id)
+    try:
+        await asyncio.to_thread(WorkflowRunner(app.state.repository, provider).run, organisation_id, brand_id, project_id, cycle_id)
+    except Exception:
+        # WorkflowRunner has already moved the cycle to failed and written the
+        # safe, user-visible Learning Ledger reason.
+        return
 
 
 def _cycle_dir(repository: VaultRepository, organisation_id: str, brand_id: str, project_id: str, cycle_id: str) -> Path:
