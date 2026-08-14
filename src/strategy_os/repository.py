@@ -11,7 +11,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import threading
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from .errors import ConflictError, ImmutableRecordError, NotFoundError, ValidationError
 from .lifecycle import require_cycle_transition, require_project_transition
@@ -106,12 +106,21 @@ class VaultRepository:
     def create_cycle(self, cycle: CycleManifest) -> CycleManifest:
         cycle.validate()
         project = self.get_project(cycle.organisation_id, cycle.brand_id, cycle.project_id)
-        if project.current_cycle_id is not None and project.status == ProjectStatus.RUNNING:
+        if project.current_cycle_id is not None:
             active = self.get_cycle(cycle.organisation_id, cycle.brand_id, cycle.project_id, project.current_cycle_id)
             if active.status in {CycleStatus.QUEUED, CycleStatus.RUNNING, CycleStatus.RECONCILING, CycleStatus.REVIEW}:
                 raise ConflictError("an active cycle already exists for this project")
         path = self._cycle_dir(cycle.organisation_id, cycle.brand_id, cycle.project_id, cycle.cycle_id) / "manifest.json"
         with self._lock:
+            project = self.get_project(cycle.organisation_id, cycle.brand_id, cycle.project_id)
+            if project.status == ProjectStatus.RUNNING:
+                project = self.update_project_status(
+                    cycle.organisation_id,
+                    cycle.brand_id,
+                    cycle.project_id,
+                    ProjectStatus.REVIEW,
+                    expected_revision=project.revision,
+                )
             self._write_once(path, self._json_bytes(cycle.to_dict()))
             self.update_project_status(
                 cycle.organisation_id,
@@ -158,6 +167,37 @@ class VaultRepository:
                         expected_revision=project.revision,
                     )
             return updated
+
+    def mark_cycle_failed_if_orphaned(
+        self,
+        organisation_id: str,
+        brand_id: str,
+        project_id: str,
+        live_cycle_ids: Set[str],
+    ) -> bool:
+        project = self.get_project(organisation_id, brand_id, project_id)
+        if not project.current_cycle_id:
+            return False
+        cycle = self.get_cycle(organisation_id, brand_id, project_id, project.current_cycle_id)
+        if cycle.status not in {CycleStatus.QUEUED, CycleStatus.RUNNING, CycleStatus.RECONCILING}:
+            return False
+        if cycle.cycle_id in live_cycle_ids:
+            return False
+        self.update_cycle_status(
+            organisation_id, brand_id, project_id, cycle.cycle_id, CycleStatus.FAILED, cycle.revision
+        )
+        path = self._cycle_dir(organisation_id, brand_id, project_id, cycle.cycle_id) / "learning-ledger.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "event": "workflow_failed",
+                "detail": {
+                    "stage": "workflow",
+                    "message": "The cycle stopped because the service restarted before it finished.",
+                    "action": "Retry this cycle from the stopped stage. Passed stages will not be re-run.",
+                },
+            }) + "\n")
+        return True
 
     def latest_passed_stage_output(
         self,

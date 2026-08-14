@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from strategy_os.app import create_app
 from strategy_os.config import Settings
+from strategy_os.models import CycleStatus, ProjectStatus
 from strategy_os.provider import FixtureProvider, ProviderError
 
 
@@ -205,6 +206,36 @@ class PilotAppTests(unittest.TestCase):
                 self.assertEqual(status["cycle"]["status"], "completed")
                 response = client.post(path + "/retry", json={"expected_revision": status["cycle"]["revision"]})
                 self.assertEqual(response.status_code, 409)
+
+    def test_orphaned_running_cycle_can_start_a_new_cycle(self) -> None:
+        with TemporaryDirectory() as raw:
+            app = create_app(Settings(Path(raw), "test-access-token", "configured", "test", "test-sha", xai_api_key="configured"), FailingProvider())
+            with TestClient(app) as client:
+                self.login(client)
+                project = client.post("/api/projects", json={
+                    "name": "Pragmatic Play strategy pilot", "brand_name": "Pragmatic Play",
+                    "brief_markdown": "A detailed working brief for recovering a cycle left running after the service restarted.",
+                    "mode": "live", "expected_revision": 0,
+                }).json()["project"]
+                started = client.post(
+                    "/api/projects/{}/{}/{}/cycles".format(project["organisation_id"], project["brand_id"], project["project_id"]),
+                    json={"expected_revision": 1, "mode": "live"},
+                ).json()["cycle"]
+                repo = app.state.repository
+                cycle = repo.get_cycle(project["organisation_id"], project["brand_id"], project["project_id"], started["cycle_id"])
+                if cycle.status == CycleStatus.FAILED:
+                    cycle = repo.update_cycle_status(project["organisation_id"], project["brand_id"], project["project_id"], started["cycle_id"], CycleStatus.RUNNING, cycle.revision)
+                current = repo.get_project(project["organisation_id"], project["brand_id"], project["project_id"])
+                if current.status == ProjectStatus.REVIEW:
+                    repo.update_project_status(project["organisation_id"], project["brand_id"], project["project_id"], ProjectStatus.RUNNING, current.revision, current_cycle_id=started["cycle_id"])
+                app.state.running_cycles.clear()
+                fresh = client.get("/api/projects/{}/{}/{}".format(project["organisation_id"], project["brand_id"], project["project_id"])).json()
+                self.assertEqual(fresh["cycles"][0]["status"], "failed")
+                response = client.post(
+                    "/api/projects/{}/{}/{}/cycles".format(project["organisation_id"], project["brand_id"], project["project_id"]),
+                    json={"expected_revision": fresh["project"]["revision"], "mode": "live"},
+                )
+                self.assertEqual(response.status_code, 202)
 
     def test_delete_project_removes_it_from_the_homepage(self) -> None:
         with TemporaryDirectory() as raw:

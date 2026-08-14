@@ -145,6 +145,7 @@ def create_app(settings: Optional[Settings] = None, provider: Optional[StrategyP
 
     @app.get("/api/projects/{organisation_id}/{brand_id}/{project_id}")
     def project_detail(organisation_id: str, brand_id: str, project_id: str, _: str = Depends(actor)) -> dict[str, Any]:
+        repository.mark_cycle_failed_if_orphaned(organisation_id, brand_id, project_id, app.state.running_cycles)
         project = repository.get_project(organisation_id, brand_id, project_id)
         return _project_detail(repository, project)
 
@@ -156,7 +157,10 @@ def create_app(settings: Optional[Settings] = None, provider: Optional[StrategyP
     @app.post("/api/projects/{organisation_id}/{brand_id}/{project_id}/cycles", status_code=202)
     async def create_cycle(organisation_id: str, brand_id: str, project_id: str, body: CycleCreate, _: str = Depends(actor)) -> dict[str, Any]:
         project = repository.get_project(organisation_id, brand_id, project_id)
-        if project.revision != body.expected_revision:
+        reaped = repository.mark_cycle_failed_if_orphaned(organisation_id, brand_id, project_id, app.state.running_cycles)
+        if reaped:
+            project = repository.get_project(organisation_id, brand_id, project_id)
+        if not reaped and project.revision != body.expected_revision:
             raise ConflictError("project revision changed; refresh and try again")
         metadata = _project_metadata(repository, project)
         mode = body.mode or metadata.get("mode", "live")
@@ -287,7 +291,12 @@ def _project_summary(repository: VaultRepository, path: Path) -> dict[str, Any]:
 
 def _project_detail(repository: VaultRepository, project: Project) -> dict[str, Any]:
     directory = repository.root / "organisations" / project.organisation_id / "brands" / project.brand_id / "projects" / project.project_id
-    cycles = [json.loads(path.read_text()) for path in sorted(directory.glob("cycles/*/manifest.json"), reverse=True)]
+    cycles = [json.loads(path.read_text()) for path in directory.glob("cycles/*/manifest.json")]
+    cycles.sort(key=lambda item: item.get("started_at") or "", reverse=True)
+    if project.current_cycle_id:
+        current = [item for item in cycles if item.get("cycle_id") == project.current_cycle_id]
+        others = [item for item in cycles if item.get("cycle_id") != project.current_cycle_id]
+        cycles = current + others
     return {"project": project.to_dict(), "brief_markdown": _brief(repository, project), "cycles": cycles, **_project_metadata(repository, project)}
 
 

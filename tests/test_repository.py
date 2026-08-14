@@ -124,6 +124,36 @@ class RepositoryTests(unittest.TestCase):
         self.repository.create_cycle(second)
         self.assertEqual(self.repository.get_project("org_burn", "brand_test", "project_one").current_cycle_id, "cycle_two")
 
+    def test_failed_cycle_releases_project_for_next_cycle(self):
+        cycle = self.repository.update_cycle_status(
+            "org_burn", "brand_test", "project_one", "cycle_one", CycleStatus.RUNNING, 1
+        )
+        self.repository.update_cycle_status(
+            "org_burn", "brand_test", "project_one", "cycle_one", CycleStatus.FAILED, cycle.revision
+        )
+        second = CycleManifest(
+            cycle_id="cycle_two",
+            organisation_id="org_burn",
+            brand_id="brand_test",
+            project_id="project_one",
+            brief_sha256=DIGEST,
+        )
+        self.repository.create_cycle(second)
+        self.assertEqual(self.repository.get_project("org_burn", "brand_test", "project_one").current_cycle_id, "cycle_two")
+
+    def test_orphaned_running_cycle_is_marked_failed(self):
+        cycle = self.repository.update_cycle_status(
+            "org_burn", "brand_test", "project_one", "cycle_one", CycleStatus.RUNNING, 1
+        )
+        self.assertTrue(self.repository.mark_cycle_failed_if_orphaned("org_burn", "brand_test", "project_one", set()))
+        self.assertEqual(self.repository.get_cycle("org_burn", "brand_test", "project_one", "cycle_one").status, CycleStatus.FAILED)
+        self.assertFalse(self.repository.mark_cycle_failed_if_orphaned("org_burn", "brand_test", "project_one", set()))
+        live = self.repository.update_cycle_status(
+            "org_burn", "brand_test", "project_one", "cycle_one", CycleStatus.RUNNING,
+            self.repository.get_cycle("org_burn", "brand_test", "project_one", "cycle_one").revision,
+        )
+        self.assertFalse(self.repository.mark_cycle_failed_if_orphaned("org_burn", "brand_test", "project_one", {live.cycle_id}))
+
     def test_quality_ledger_retains_attributable_finding(self):
         finding = QualityFinding(
             finding_id="finding_one",
