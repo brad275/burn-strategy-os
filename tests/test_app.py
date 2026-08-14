@@ -124,7 +124,87 @@ class PilotAppTests(unittest.TestCase):
                 self.assertEqual(failure["event"], "workflow_failed")
                 self.assertEqual(failure["detail"]["stage"], "source_collection")
                 self.assertIn("resumable search results", failure["detail"]["message"])
-                self.assertIn("start a new cycle", failure["detail"]["action"])
+                self.assertIn("Retry this cycle from the stopped stage", failure["detail"]["action"])
+
+    def test_retry_resumes_from_failed_stage_without_recollecting_sources(self) -> None:
+        class StrategyCutoffProvider(FixtureProvider):
+            def __init__(self):
+                self.source_calls = 0
+                self.generated = []
+                self.strategy_failures = 1
+
+            def collect_sources(self, brief, context):
+                self.source_calls += 1
+                return super().collect_sources(brief, context)
+
+            def generate(self, stage_id, brief, context, revision):
+                self.generated.append(stage_id)
+                if stage_id == "strategy" and self.strategy_failures:
+                    self.strategy_failures -= 1
+                    raise ProviderError("The model response was cut off before the structured result was complete; reduce the brief or raise the output limit.")
+                return super().generate(stage_id, brief, context, revision)
+
+        provider = StrategyCutoffProvider()
+        with TemporaryDirectory() as raw:
+            app = create_app(Settings(Path(raw), "test-access-token", "configured", "test", "test-sha", xai_api_key="configured"), provider)
+            with TestClient(app) as client:
+                self.login(client)
+                project = client.post("/api/projects", json={
+                    "name": "Pragmatic Play strategy pilot", "brand_name": "Pragmatic Play",
+                    "brief_markdown": "A detailed working brief for testing retry from a failed synthesis stage without repeating source collection.",
+                    "mode": "live", "expected_revision": 0,
+                }).json()["project"]
+                started = client.post(
+                    "/api/projects/{}/{}/{}/cycles".format(project["organisation_id"], project["brand_id"], project["project_id"]),
+                    json={"expected_revision": 1, "mode": "live"},
+                ).json()["cycle"]
+                path = "/api/cycles/{}/{}/{}/{}".format(project["organisation_id"], project["brand_id"], project["project_id"], started["cycle_id"])
+                for _ in range(40):
+                    status = client.get(path).json()
+                    if status["cycle"]["status"] == "failed":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(status["cycle"]["status"], "failed")
+                self.assertEqual(status["ledger"][-1]["detail"]["stage"], "strategy")
+                self.assertEqual(provider.source_calls, 1)
+                self.assertNotIn("reconciliation", provider.generated)
+                retried = client.post(path + "/retry", json={"expected_revision": status["cycle"]["revision"]})
+                self.assertEqual(retried.status_code, 202)
+                for _ in range(80):
+                    status = client.get(path).json()
+                    if status["cycle"]["status"] in {"completed", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(status["cycle"]["status"], "completed", status)
+                self.assertEqual(provider.source_calls, 1)
+                self.assertEqual(provider.generated.count("strategy"), 2)
+                self.assertTrue(status["document_ready"])
+
+    def test_retry_rejects_a_completed_cycle(self) -> None:
+        with TemporaryDirectory() as raw:
+            with TestClient(self.make_app(Path(raw))) as client:
+                self.login(client)
+                created = client.post("/api/projects", json={
+                    "name": "Pragmatic Play strategy pilot",
+                    "brand_name": "Pragmatic Play",
+                    "brief_markdown": "A detailed working brief used to prove completed cycles cannot be retried from a failed-stage endpoint.",
+                    "mode": "fixture", "expected_revision": 0,
+                })
+                project = created.json()["project"]
+                started = client.post(
+                    "/api/projects/{}/{}/{}/cycles".format(project["organisation_id"], project["brand_id"], project["project_id"]),
+                    json={"expected_revision": 1, "mode": "fixture"},
+                )
+                cycle_id = started.json()["cycle"]["cycle_id"]
+                path = "/api/cycles/{}/{}/{}/{}".format(project["organisation_id"], project["brand_id"], project["project_id"], cycle_id)
+                for _ in range(30):
+                    status = client.get(path).json()
+                    if status["cycle"]["status"] in {"completed", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(status["cycle"]["status"], "completed")
+                response = client.post(path + "/retry", json={"expected_revision": status["cycle"]["revision"]})
+                self.assertEqual(response.status_code, 409)
 
     def test_delete_project_removes_it_from_the_homepage(self) -> None:
         with TemporaryDirectory() as raw:

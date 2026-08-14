@@ -26,6 +26,7 @@ from .models import (
     ProjectStatus,
     QualityFinding,
     StageAttempt,
+    StageAttemptStatus,
     utc_now,
     validate_id,
 )
@@ -157,6 +158,42 @@ class VaultRepository:
                         expected_revision=project.revision,
                     )
             return updated
+
+    def latest_passed_stage_output(
+        self,
+        organisation_id: str,
+        brand_id: str,
+        project_id: str,
+        cycle_id: str,
+        stage_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        directory = self._cycle_dir(organisation_id, brand_id, project_id, cycle_id) / "attempts" / stage_id
+        if not directory.exists():
+            return None
+        latest: Optional[Dict[str, Any]] = None
+        for path in sorted(directory.glob("*.json")):
+            data = self._read_json(path)
+            if data.get("status") == StageAttemptStatus.PASSED.value and isinstance(data.get("output"), dict):
+                latest = data["output"]
+        return latest
+
+    def next_stage_attempt_number(
+        self,
+        organisation_id: str,
+        brand_id: str,
+        project_id: str,
+        cycle_id: str,
+        stage_id: str,
+    ) -> int:
+        directory = self._cycle_dir(organisation_id, brand_id, project_id, cycle_id) / "attempts" / stage_id
+        highest = 0
+        if directory.exists():
+            for path in directory.glob("*.json"):
+                data = self._read_json(path)
+                number = data.get("attempt_number")
+                if isinstance(number, int) and number > highest:
+                    highest = number
+        return highest + 1
 
     def write_stage_attempt(
         self,

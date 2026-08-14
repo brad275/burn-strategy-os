@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from .auth import COOKIE_NAME, issue_cookie, read_cookie
 from .config import Settings
 from .errors import ConflictError, NotFoundError, ValidationError
-from .models import CycleManifest, FeedbackEvent, FeedbackVerdict, Project, utc_now, validate_id
+from .models import CycleManifest, CycleStatus, FeedbackEvent, FeedbackVerdict, Project, ProjectStatus, utc_now, validate_id
 from .provider import AnthropicProvider, FixtureProvider, LiveStrategyProvider, StrategyProvider, XaiProvider
 from .repository import VaultRepository
 from .workflow import WorkflowRunner
@@ -44,6 +44,10 @@ class ProjectCreate(BaseModel):
 class CycleCreate(BaseModel):
     expected_revision: int = Field(ge=1)
     mode: str = Field(default="live", pattern="^(live|fixture)$")
+
+
+class CycleRetry(BaseModel):
+    expected_revision: int = Field(ge=1)
 
 
 class FeedbackCreate(BaseModel):
@@ -156,26 +160,30 @@ def create_app(settings: Optional[Settings] = None, provider: Optional[StrategyP
             raise ConflictError("project revision changed; refresh and try again")
         metadata = _project_metadata(repository, project)
         mode = body.mode or metadata.get("mode", "live")
-        if mode == "live":
-            missing = []
-            if not settings.anthropic_api_key:
-                missing.append("ANTHROPIC_API_KEY")
-            if not settings.xai_api_key:
-                missing.append("XAI_API_KEY")
-            if missing:
-                raise HTTPException(status_code=503, detail="The live model key has not been configured in Railway yet. Use fixture verification locally only.")
+        selected = _provider_for_mode(app, settings, mode)
         cycle = CycleManifest(cycle_id="cycle-" + uuid4().hex[:18], organisation_id=organisation_id, brand_id=brand_id, project_id=project_id, brief_sha256=repository.sha256_text(_brief(repository, project)), prompt_versions={"workflow": "pilot-v1"}, code_version=settings.code_version)
         repository.create_cycle(cycle)
-        if app.state.provider:
-            selected = app.state.provider
-        elif mode == "fixture":
-            selected = FixtureProvider()
-        else:
-            selected = LiveStrategyProvider(AnthropicProvider(settings.anthropic_api_key or ""), XaiProvider(settings.xai_api_key or "", settings.xai_model))
-        task = asyncio.create_task(_run_cycle(app, selected, organisation_id, brand_id, project_id, cycle.cycle_id))
-        task.add_done_callback(lambda __: app.state.running_cycles.discard(cycle.cycle_id))
-        app.state.running_cycles.add(cycle.cycle_id)
+        _spawn_cycle(app, selected, organisation_id, brand_id, project_id, cycle.cycle_id)
         return {"cycle": cycle.to_dict(), "poll": f"/api/cycles/{organisation_id}/{brand_id}/{project_id}/{cycle.cycle_id}"}
+
+    @app.post("/api/cycles/{organisation_id}/{brand_id}/{project_id}/{cycle_id}/retry", status_code=202)
+    async def retry_cycle(organisation_id: str, brand_id: str, project_id: str, cycle_id: str, body: CycleRetry, _: str = Depends(actor)) -> dict[str, Any]:
+        cycle = repository.get_cycle(organisation_id, brand_id, project_id, cycle_id)
+        if cycle.revision != body.expected_revision:
+            raise ConflictError("cycle revision changed; refresh and try again")
+        if cycle.status != CycleStatus.FAILED:
+            raise ConflictError("only a failed cycle can be retried")
+        if cycle_id in app.state.running_cycles:
+            raise ConflictError("this cycle is already running")
+        project = repository.get_project(organisation_id, brand_id, project_id)
+        metadata = _project_metadata(repository, project)
+        selected = _provider_for_mode(app, settings, metadata.get("mode", "live"))
+        cycle = repository.update_cycle_status(organisation_id, brand_id, project_id, cycle_id, CycleStatus.RUNNING, cycle.revision)
+        project = repository.get_project(organisation_id, brand_id, project_id)
+        if project.status == ProjectStatus.REVIEW:
+            repository.update_project_status(organisation_id, brand_id, project_id, ProjectStatus.RUNNING, project.revision, current_cycle_id=cycle_id)
+        _spawn_cycle(app, selected, organisation_id, brand_id, project_id, cycle_id)
+        return {"cycle": cycle.to_dict(), "poll": f"/api/cycles/{organisation_id}/{brand_id}/{project_id}/{cycle_id}"}
 
     @app.get("/api/cycles/{organisation_id}/{brand_id}/{project_id}/{cycle_id}")
     def cycle_detail(organisation_id: str, brand_id: str, project_id: str, cycle_id: str, _: str = Depends(actor)) -> dict[str, Any]:
@@ -214,6 +222,35 @@ def create_app(settings: Optional[Settings] = None, provider: Optional[StrategyP
         return {"decision": decision}
 
     return app
+
+
+def _provider_for_mode(app: FastAPI, settings: Settings, mode: str) -> StrategyProvider:
+    if mode == "live":
+        missing = []
+        if not settings.anthropic_api_key:
+            missing.append("ANTHROPIC_API_KEY")
+        if not settings.xai_api_key:
+            missing.append("XAI_API_KEY")
+        if missing:
+            raise HTTPException(status_code=503, detail="The live model key has not been configured in Railway yet. Use fixture verification locally only.")
+    if app.state.provider:
+        return app.state.provider
+    if mode == "fixture":
+        return FixtureProvider()
+    return LiveStrategyProvider(AnthropicProvider(settings.anthropic_api_key or ""), XaiProvider(settings.xai_api_key or "", settings.xai_model))
+
+
+def _spawn_cycle(app: FastAPI, provider: StrategyProvider, organisation_id: str, brand_id: str, project_id: str, cycle_id: str) -> None:
+    app.state.running_cycles.add(cycle_id)
+    if getattr(app.state, "settings", None) and app.state.settings.app_env == "test":
+        try:
+            WorkflowRunner(app.state.repository, provider).run(organisation_id, brand_id, project_id, cycle_id)
+        except Exception:
+            pass
+        app.state.running_cycles.discard(cycle_id)
+        return
+    task = asyncio.create_task(_run_cycle(app, provider, organisation_id, brand_id, project_id, cycle_id))
+    task.add_done_callback(lambda __: app.state.running_cycles.discard(cycle_id))
 
 
 async def _run_cycle(app: FastAPI, provider: StrategyProvider, organisation_id: str, brand_id: str, project_id: str, cycle_id: str) -> None:

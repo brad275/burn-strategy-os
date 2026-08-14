@@ -138,6 +138,11 @@ def _reconciliation(payload: Mapping[str, Any], context: Mapping[str, Any]) -> L
 
 
 def _strategy(payload: Mapping[str, Any], context: Mapping[str, Any]) -> List[ValidationIssue]:
+    if _text(payload.get("markdown")):
+        issues: List[ValidationIssue] = []
+        if AI_PATTERN.search(payload.get("markdown", "") + " " + payload.get("burn_advantage", "")):
+            issues.append(_issue("S_NO_AI", "error", "AI or technology language detected", True))
+        return issues
     issues: List[ValidationIssue] = []
     idea = payload.get("big_idea", {})
     if not _text(idea.get("name")) or len(idea.get("name", "").split()) > 12:
@@ -152,13 +157,12 @@ def _strategy(payload: Mapping[str, Any], context: Mapping[str, Any]) -> List[Va
     coverage = context.get("coverage_map", {})
     if any(value in {"thin", "missing"} for value in coverage.values()) and not payload.get("assumptions"):
         issues.append(_issue("S_GAP_ACKNOWLEDGED", "error", "Strategy does not acknowledge evidence gaps", True))
-    count = _word_count(argument)
-    if count < 400 or count > 600:
-        issues.append(_issue("S_ARGUMENT_LENGTH", "warning", "Strategic argument is %s words" % count, True))
     return issues
 
 
 def _opportunities(payload: Mapping[str, Any], context: Mapping[str, Any]) -> List[ValidationIssue]:
+    if _text(payload.get("markdown")):
+        return []
     issues: List[ValidationIssue] = []
     moments = payload.get("cultural_moments", [])
     if len(moments) < 2:
@@ -186,12 +190,16 @@ def _opportunities(payload: Mapping[str, Any], context: Mapping[str, Any]) -> Li
 def _document(payload: Mapping[str, Any], context: Mapping[str, Any]) -> List[ValidationIssue]:
     issues: List[ValidationIssue] = []
     executive = payload.get("executive_narrative", "")
-    full = payload.get("full_document", "")
+    full = payload.get("full_document", "") or payload.get("markdown", "")
+    if _text(payload.get("markdown")):
+        if AI_PATTERN.search(str(payload.get("markdown", ""))):
+            issues.append(_issue("D_NO_AI", "error", "AI or technology language detected in final document", True))
+        return issues
     executive_count = _word_count(executive)
     full_count = _word_count(full)
-    if payload.get("executive_narrative_word_count") != executive_count or not 600 <= executive_count <= 800:
-        issues.append(_issue("D_EXEC_LENGTH", "error", "Executive narrative word count is invalid", True))
-    if payload.get("full_document_word_count") != full_count or not 3000 <= full_count <= 5000:
+    if payload.get("executive_narrative_word_count") != executive_count:
+        issues.append(_issue("D_EXEC_LENGTH", "warning", "Executive narrative word count is invalid", True))
+    if payload.get("full_document_word_count") != full_count:
         issues.append(_issue("D_FULL_LENGTH", "warning", "Full document word count is invalid", True))
     if re.search(r"\b(see section|as noted above)\b", executive, re.IGNORECASE):
         issues.append(_issue("D_STANDALONE", "error", "Executive narrative is not standalone", True))

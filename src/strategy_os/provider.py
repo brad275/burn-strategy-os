@@ -17,11 +17,12 @@ STAGE_MAX_TOKENS = {
     "competitive": 8000,
     "audience": 8000,
     "reconciliation": 6000,
-    "strategy": 7000,
-    "opportunities": 7000,
-    "document_assembly": 10000,
+    "strategy": 8000,
+    "opportunities": 8000,
+    "document_assembly": 12000,
     "memory_proposal": 4000,
 }
+MARKDOWN_STAGES = frozenset({"strategy", "opportunities", "document_assembly"})
 RESEARCH_SOURCE_LIMIT = 12
 RESEARCH_EXCERPT_CHARS = 240
 COMPACT_TEXT_CHARS = 220
@@ -472,7 +473,9 @@ class AnthropicProvider:
             compact["reconciliation"] = AnthropicProvider._compact_reconciliation(context.get("reconciliation"))
             compact["coverage_map"] = context.get("coverage_map") or compact["reconciliation"].get("coverage_map", {})
         if stage_id == "memory_proposal":
-            compact["full_document_word_count"] = context.get("full_document_word_count")
+            document = context.get("document_assembly") if isinstance(context.get("document_assembly"), dict) else {}
+            compact["full_document_word_count"] = context.get("full_document_word_count") or document.get("full_document_word_count")
+            compact["document_excerpt"] = _clip_text(document.get("markdown") or document.get("full_document"), 900)
         return compact
 
 
@@ -503,6 +506,75 @@ def build_generate_prompt(stage_id: str, brief: str, context: dict[str, Any], re
     return prompt
 
 
+def build_markdown_prompt(stage_id: str, brief: str, context: dict[str, Any], revision: int) -> str:
+    headings = {
+        "strategy": "## Big idea\n## Strategic argument\n## Burn advantage\n## Assumptions",
+        "opportunities": "## Cultural moments\n## Partnership candidates\n## Platform windows",
+        "document_assembly": "## Executive narrative\n## Strategy",
+    }
+    return "\n".join([
+        "You are a BURN strategist writing for a client.",
+        "Write markdown only. Use exactly these headings:",
+        headings[stage_id],
+        "Do not return JSON. Do not use fences.",
+        "Never mention AI, agents, systems, or automation.",
+        "Use only facts present in the context. Label gaps as assumptions.",
+        "Revision: %s" % revision,
+        "Brief:",
+        brief,
+        "Context:",
+        json.dumps(AnthropicProvider._context_for_stage(stage_id, context), default=str),
+    ])
+
+
+def parse_markdown_sections(text: str) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    current: str | None = None
+    lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if current is not None:
+                sections[current] = "\n".join(lines).strip()
+            current = line[3:].strip().lower()
+            lines = []
+        else:
+            lines.append(line)
+    if current is not None:
+        sections[current] = "\n".join(lines).strip()
+    return sections
+
+
+def parse_markdown_stage_output(stage_id: str, text: str, context: dict[str, Any], revision: int) -> dict[str, Any]:
+    stripped = text.strip()
+    sections = parse_markdown_sections(stripped)
+    if len(stripped) < 80 or len(sections) < 2:
+        raise ProviderError("The model returned incomplete markdown; try the cycle again.")
+    result: dict[str, Any] = {
+        "stage": stage_id,
+        "cycle_id": context.get("cycle_id"),
+        "brand_slug": context.get("brand_slug"),
+        "revision": revision,
+        "markdown": stripped,
+        "body": stripped,
+    }
+    if stage_id == "strategy":
+        idea = sections.get("big idea") or next(iter(sections.values()), "")
+        result["big_idea"] = {"name": " ".join(idea.split()[:12])}
+        result["strategic_argument"] = sections.get("strategic argument", "")
+        result["burn_advantage"] = sections.get("burn advantage", "")
+        assumption = sections.get("assumptions", "")
+        result["assumptions"] = [assumption] if assumption else []
+    if stage_id == "document_assembly":
+        result["full_document"] = stripped
+        result["full_document_word_count"] = len(stripped.split())
+        executive = sections.get("executive narrative", "")
+        result["executive_narrative"] = executive
+        result["executive_narrative_word_count"] = len(executive.split())
+        result["source_appendix"] = []
+        result["claim_traceability"] = []
+    return result
+
+
 class XaiProvider:
     """Grok chat-completions adapter for strategy stages. Does not run web search."""
 
@@ -511,7 +583,10 @@ class XaiProvider:
         self.model = model or DEFAULT_XAI_MODEL
 
     def generate(self, stage_id: str, brief: str, context: dict[str, Any], revision: int) -> dict[str, Any]:
-        return self._request(json.dumps(build_generate_prompt(stage_id, brief, context, revision)), STAGE_MAX_TOKENS.get(stage_id, DEFAULT_STAGE_MAX_TOKENS))
+        max_tokens = STAGE_MAX_TOKENS.get(stage_id, DEFAULT_STAGE_MAX_TOKENS)
+        if stage_id in MARKDOWN_STAGES:
+            return self._request_markdown(build_markdown_prompt(stage_id, brief, context, revision), max_tokens, stage_id, context, revision)
+        return self._request(json.dumps(build_generate_prompt(stage_id, brief, context, revision)), max_tokens)
 
     def collect_sources(self, brief: str, context: dict[str, Any]) -> list[dict[str, Any]]:
         raise ProviderError("Grok is not used for source collection; Anthropic web search is required.")
@@ -538,6 +613,20 @@ class XaiProvider:
         if not isinstance(result, dict):
             raise ProviderError("The model returned an unexpected structured result instead of a JSON object.")
         return result
+
+    def _request_markdown(self, prompt: str, max_tokens: int, stage_id: str, context: dict[str, Any], revision: int) -> dict[str, Any]:
+        payload = self._post({
+            "model": self.model,
+            "temperature": 0.2,
+            "max_completion_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": "Write markdown with the requested headings. No JSON. No preamble."},
+                {"role": "user", "content": prompt},
+            ],
+        })
+        self._validate_response(payload)
+        text = self._extract_text(payload)
+        return parse_markdown_stage_output(stage_id, text, context, revision)
 
     def _post(self, request_payload: dict[str, Any]) -> dict[str, Any]:
         request = Request(

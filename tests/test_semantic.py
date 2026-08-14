@@ -80,6 +80,16 @@ class SemanticValidationTests(unittest.TestCase):
         issues = validate_stage_output(payload, {"coverage_map": {"audience_behavior": "thin"}})
         self.assertIn("S_GAP_ACKNOWLEDGED", {issue.check_id for issue in issues})
 
+    def test_markdown_strategy_skips_json_word_quotas(self):
+        payload = {
+            "stage": "strategy",
+            "cycle_id": "cycle_one",
+            "brand_slug": "test-brand",
+            "revision": 1,
+            "markdown": "## Big idea\nMake Each Moment Matter\n## Strategic argument\nA short argument.",
+        }
+        self.assertEqual(validate_stage_output(payload), [])
+
     def test_memory_never_arrives_preapproved(self):
         payload = {
             "stage": "memory_proposal",

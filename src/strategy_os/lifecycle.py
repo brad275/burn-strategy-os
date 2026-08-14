@@ -20,7 +20,7 @@ CYCLE_TRANSITIONS: Dict[CycleStatus, FrozenSet[CycleStatus]] = {
     CycleStatus.RECONCILING: frozenset({CycleStatus.REVIEW, CycleStatus.FAILED}),
     CycleStatus.REVIEW: frozenset({CycleStatus.RUNNING, CycleStatus.COMPLETED, CycleStatus.FAILED}),
     CycleStatus.COMPLETED: frozenset({CycleStatus.SUPERSEDED}),
-    CycleStatus.FAILED: frozenset(),
+    CycleStatus.FAILED: frozenset({CycleStatus.RUNNING}),
     CycleStatus.SUPERSEDED: frozenset(),
 }
 

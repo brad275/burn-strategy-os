@@ -16,6 +16,7 @@ from strategy_os.provider import (
     SOURCE_COLLECTION_MAX_TOKENS,
     STAGE_MAX_TOKENS,
     XaiProvider,
+    parse_markdown_stage_output,
 )
 
 
@@ -279,6 +280,24 @@ class XaiProviderTests(unittest.TestCase):
     def test_refusal(self):
         with self.assertRaisesRegex(ProviderError, "declined"):
             self.request({"choices": [{"finish_reason": "stop", "message": {"content": "", "refusal": "no"}}]})
+
+    def test_strategy_markdown_skips_json_mode(self):
+        markdown = "## Big idea\nMake Each Moment Matter\n\n## Strategic argument\nThis works because culture rewards presence.\n\n## Burn advantage\nCraft joined to clarity.\n\n## Assumptions\nCoverage is adequate."
+        with patch("strategy_os.provider.urlopen", return_value=_Response({
+            "choices": [{"finish_reason": "stop", "message": {"content": markdown}}],
+        })) as mocked:
+            result = self.provider.generate("strategy", "A working brief.", {"cycle_id": "cycle-1", "brand_slug": "pragmatic-play"}, 1)
+        self.assertEqual(result["stage"], "strategy")
+        self.assertIn("Make Each Moment Matter", result["markdown"])
+        body = json.loads(mocked.call_args.args[0].data.decode())
+        self.assertNotIn("response_format", body)
+        self.assertEqual(body["max_completion_tokens"], STAGE_MAX_TOKENS["strategy"])
+
+    def test_parse_markdown_stage_output(self):
+        text = "## Big idea\nOwn the pause\n\n## Strategic argument\nBecause attention is scarce.\n\n## Burn advantage\nTaste.\n\n## Assumptions\nNone."
+        result = parse_markdown_stage_output("strategy", text, {"cycle_id": "cycle-1", "brand_slug": "brand"}, 1)
+        self.assertEqual(result["big_idea"]["name"], "Own the pause")
+        self.assertIn("Because", result["strategic_argument"])
 
 
 class LiveStrategyProviderTests(unittest.TestCase):
