@@ -18,6 +18,20 @@ class FailingProvider(FixtureProvider):
         raise ProviderError("Source research paused without resumable search results.")
 
 
+class TrackingProvider(FixtureProvider):
+    def __init__(self):
+        self.source_calls = 0
+        self.generated = []
+
+    def collect_sources(self, brief, context):
+        self.source_calls += 1
+        return super().collect_sources(brief, context)
+
+    def generate(self, stage_id, brief, context, revision):
+        self.generated.append(stage_id)
+        return super().generate(stage_id, brief, context, revision)
+
+
 class PilotAppTests(unittest.TestCase):
     def make_app(self, root: Path):
         return create_app(Settings(root, "test-access-token", None, "test", "test-sha"), FixtureProvider())
@@ -206,6 +220,87 @@ class PilotAppTests(unittest.TestCase):
                 self.assertEqual(status["cycle"]["status"], "completed")
                 response = client.post(path + "/retry", json={"expected_revision": status["cycle"]["revision"]})
                 self.assertEqual(response.status_code, 409)
+
+    def test_resume_from_strategy_skips_sources_and_research(self) -> None:
+        provider = TrackingProvider()
+        with TemporaryDirectory() as raw:
+            app = create_app(Settings(Path(raw), "test-access-token", None, "test", "test-sha"), provider)
+            with TestClient(app) as client:
+                self.login(client)
+                path, status = self._complete_fixture_cycle(client)
+                self.assertEqual(provider.source_calls, 1)
+                self.assertEqual(provider.generated.count("research"), 1)
+                self.assertEqual(provider.generated.count("strategy"), 1)
+                first_attempts = {item["stage"]: item["attempts"] for item in status["stages"]}
+                resumed = client.post(path + "/resume", json={"expected_revision": status["cycle"]["revision"], "from_stage": "strategy"})
+                self.assertEqual(resumed.status_code, 202, resumed.text)
+                status = self._wait_for_cycle(client, path)
+                self.assertEqual(status["cycle"]["status"], "completed", status)
+                self.assertEqual(provider.source_calls, 1)
+                self.assertEqual(provider.generated.count("research"), 1)
+                self.assertEqual(provider.generated.count("competitive"), 1)
+                self.assertEqual(provider.generated.count("audience"), 1)
+                self.assertEqual(provider.generated.count("strategy"), 2)
+                self.assertNotIn("reconciliation", provider.generated)
+                attempts = {item["stage"]: item["attempts"] for item in status["stages"]}
+                self.assertEqual(attempts["research"], first_attempts["research"])
+                self.assertGreater(attempts["strategy"], first_attempts["strategy"])
+                self.assertGreaterEqual(len(status["memory_proposals"]), 2)
+                self.assertTrue(status["document_ready"])
+
+    def test_resume_from_research_regenerates_research_not_sources(self) -> None:
+        provider = TrackingProvider()
+        with TemporaryDirectory() as raw:
+            app = create_app(Settings(Path(raw), "test-access-token", None, "test", "test-sha"), provider)
+            with TestClient(app) as client:
+                self.login(client)
+                path, status = self._complete_fixture_cycle(client)
+                resumed = client.post(path + "/resume", json={"expected_revision": status["cycle"]["revision"], "from_stage": "research"})
+                self.assertEqual(resumed.status_code, 202, resumed.text)
+                status = self._wait_for_cycle(client, path)
+                self.assertEqual(status["cycle"]["status"], "completed", status)
+                self.assertEqual(provider.source_calls, 1)
+                self.assertEqual(provider.generated.count("research"), 2)
+                self.assertEqual(provider.generated.count("strategy"), 2)
+                attempts = {item["stage"]: item["attempts"] for item in status["stages"]}
+                self.assertGreaterEqual(attempts["research"], 2)
+                self.assertGreaterEqual(attempts["reconciliation"], 2)
+                self.assertGreaterEqual(len(status["memory_proposals"]), 2)
+
+    def test_resume_rejects_an_invalid_stage(self) -> None:
+        with TemporaryDirectory() as raw:
+            with TestClient(self.make_app(Path(raw))) as client:
+                self.login(client)
+                path, status = self._complete_fixture_cycle(client)
+                response = client.post(path + "/resume", json={"expected_revision": status["cycle"]["revision"], "from_stage": "source_collection"})
+                self.assertEqual(response.status_code, 422)
+
+    def _complete_fixture_cycle(self, client: TestClient) -> tuple[str, dict]:
+        created = client.post("/api/projects", json={
+            "name": "Pragmatic Play strategy pilot",
+            "brand_name": "Pragmatic Play",
+            "brief_markdown": "A detailed working brief used to prove a completed cycle can resume from research or strategy without repeating source collection.",
+            "mode": "fixture", "expected_revision": 0,
+        })
+        project = created.json()["project"]
+        started = client.post(
+            "/api/projects/{}/{}/{}/cycles".format(project["organisation_id"], project["brand_id"], project["project_id"]),
+            json={"expected_revision": 1, "mode": "fixture"},
+        )
+        cycle_id = started.json()["cycle"]["cycle_id"]
+        path = "/api/cycles/{}/{}/{}/{}".format(project["organisation_id"], project["brand_id"], project["project_id"], cycle_id)
+        status = self._wait_for_cycle(client, path)
+        self.assertEqual(status["cycle"]["status"], "completed")
+        return path, status
+
+    def _wait_for_cycle(self, client: TestClient, path: str) -> dict:
+        status = {}
+        for _ in range(40):
+            status = client.get(path).json()
+            if status["cycle"]["status"] in {"completed", "failed"}:
+                return status
+            time.sleep(0.05)
+        return status
 
     def test_orphaned_running_cycle_can_start_a_new_cycle(self) -> None:
         with TemporaryDirectory() as raw:

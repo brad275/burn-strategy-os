@@ -20,9 +20,8 @@ class LifecycleTests(unittest.TestCase):
     def test_failed_cycle_can_run_again(self):
         require_cycle_transition(CycleStatus.FAILED, CycleStatus.RUNNING)
 
-    def test_completed_cycle_cannot_run_again(self):
-        with self.assertRaises(InvalidTransitionError):
-            require_cycle_transition(CycleStatus.COMPLETED, CycleStatus.RUNNING)
+    def test_completed_cycle_can_run_again_from_a_later_stage(self):
+        require_cycle_transition(CycleStatus.COMPLETED, CycleStatus.RUNNING)
 
     def test_approved_project_cannot_return_to_draft(self):
         with self.assertRaises(InvalidTransitionError):

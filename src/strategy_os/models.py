@@ -202,8 +202,8 @@ class StageAttempt(Record):
         super().validate()
         for name in ("attempt_id", "cycle_id", "stage_id"):
             validate_id(getattr(self, name), name)
-        if self.attempt_number not in (1, 2, 3):
-            raise ValidationError("attempt_number must be 1, 2, or 3")
+        if self.attempt_number < 1:
+            raise ValidationError("attempt_number must be positive")
         if not SHA256_PATTERN.fullmatch(self.input_hash):
             raise ValidationError("input_hash must be a lowercase SHA-256 hex digest")
         if not isinstance(self.output, dict):

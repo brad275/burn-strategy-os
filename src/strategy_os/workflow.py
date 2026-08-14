@@ -20,6 +20,8 @@ from .semantic import validate_stage_output
 STAGES = ("source_collection", "research", "competitive", "audience", "reconciliation", "strategy", "opportunities", "document_assembly", "memory_proposal")
 EVIDENCE_STAGES = ("research", "competitive", "audience")
 SYNTHESIS_STAGES = ("strategy", "opportunities", "document_assembly", "memory_proposal")
+RESUME_FROM = {"research", "strategy"}
+STRATEGY_PREREQUISITES = ("source_collection", "research", "competitive", "audience", "reconciliation")
 
 
 class WorkflowRunner:
@@ -27,11 +29,21 @@ class WorkflowRunner:
         self.repository = repository
         self.provider = provider
 
-    def run(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str) -> None:
+    def run(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, from_stage: str | None = None) -> None:
         active_stage = "source_collection"
+        replace_outputs = from_stage is not None
         try:
+            if from_stage is not None:
+                if from_stage not in RESUME_FROM:
+                    raise ValidationError("resume is only allowed from research or strategy")
+                if not self.repository.latest_passed_stage_output(organisation_id, brand_id, project_id, cycle_id, "source_collection"):
+                    raise ValidationError("cannot resume without passed source collection")
+                if from_stage == "strategy":
+                    for stage in STRATEGY_PREREQUISITES:
+                        if not self.repository.latest_passed_stage_output(organisation_id, brand_id, project_id, cycle_id, stage):
+                            raise ValidationError("cannot resume from strategy without passed %s" % stage)
             cycle = self.repository.get_cycle(organisation_id, brand_id, project_id, cycle_id)
-            if cycle.status in {CycleStatus.QUEUED, CycleStatus.FAILED}:
+            if cycle.status in {CycleStatus.QUEUED, CycleStatus.FAILED, CycleStatus.COMPLETED}:
                 cycle = self.repository.update_cycle_status(organisation_id, brand_id, project_id, cycle_id, CycleStatus.RUNNING, cycle.revision)
             project = self.repository.get_project(organisation_id, brand_id, project_id)
             if project.status == ProjectStatus.REVIEW:
@@ -42,6 +54,9 @@ class WorkflowRunner:
                 passed = self.repository.latest_passed_stage_output(organisation_id, brand_id, project_id, cycle_id, stage)
                 if passed:
                     context[stage] = passed
+            if from_stage:
+                for stage in STAGES[STAGES.index(from_stage):]:
+                    context.pop(stage, None)
             if context.get("memory_proposal") and not self._memory_proposal_exists(organisation_id, brand_id, cycle_id):
                 del context["memory_proposal"]
             brief = (project_dir / "brief.md").read_text(encoding="utf-8")
@@ -59,6 +74,7 @@ class WorkflowRunner:
                 context["reconciliation"] = self._local_reconciliation(organisation_id, brand_id, project_id, cycle_id, context)
             context["coverage_map"] = context["reconciliation"].get("coverage_map", {})
             context["claim_ids"] = _claim_ids(context)
+            memory_rerun = "memory_proposal" not in context
             for stage in SYNTHESIS_STAGES:
                 active_stage = stage
                 if stage not in context:
@@ -66,8 +82,8 @@ class WorkflowRunner:
                 if stage == "document_assembly":
                     assembled = context[stage]
                     context["full_document_word_count"] = assembled.get("full_document_word_count") or len(str(assembled.get("full_document") or assembled.get("markdown") or "").split())
-            self._create_memory_proposal(organisation_id, brand_id, project_id, cycle_id, context["memory_proposal"])
-            self._write_document(organisation_id, brand_id, project_id, cycle_id, context["document_assembly"])
+            self._create_memory_proposal(organisation_id, brand_id, project_id, cycle_id, context["memory_proposal"], force_new=memory_rerun)
+            self._write_document(organisation_id, brand_id, project_id, cycle_id, context["document_assembly"], replace=replace_outputs)
             cycle = self.repository.get_cycle(organisation_id, brand_id, project_id, cycle_id)
             cycle = self.repository.update_cycle_status(organisation_id, brand_id, project_id, cycle_id, CycleStatus.REVIEW, cycle.revision)
             self.repository.update_cycle_status(organisation_id, brand_id, project_id, cycle_id, CycleStatus.COMPLETED, cycle.revision)
@@ -102,13 +118,12 @@ class WorkflowRunner:
 
     def _execute_stage(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, stage: str, brief: str, context: dict[str, Any]) -> dict[str, Any]:
         start = self.repository.next_stage_attempt_number(organisation_id, brand_id, project_id, cycle_id, stage)
-        if start > 3:
-            raise ValidationError("%s has no remaining revisions" % stage)
-        for number in range(start, min(start + 2, 4)):
-            output = self.provider.generate(stage, brief, context, number)
+        for index, number in enumerate((start, start + 1)):
+            revision = index + 1
+            output = self.provider.generate(stage, brief, context, revision)
             issues = validate_stage_output(output, context)
             errors = [issue for issue in issues if issue.severity == "error"]
-            status = StageAttemptStatus.PASSED if not errors else (StageAttemptStatus.REVISING if number < 3 else StageAttemptStatus.NEEDS_HUMAN_REVIEW)
+            status = StageAttemptStatus.PASSED if not errors else (StageAttemptStatus.REVISING if index == 0 else StageAttemptStatus.NEEDS_HUMAN_REVIEW)
             attempt = self._write_attempt(organisation_id, brand_id, project_id, cycle_id, stage, number, output, status)
             for issue in issues:
                 self.repository.add_quality_finding(organisation_id, brand_id, project_id, QualityFinding(
@@ -135,8 +150,8 @@ class WorkflowRunner:
                 return True
         return False
 
-    def _create_memory_proposal(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, output: dict[str, Any]) -> None:
-        if self._memory_proposal_exists(organisation_id, brand_id, cycle_id):
+    def _create_memory_proposal(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, output: dict[str, Any], force_new: bool = False) -> None:
+        if not force_new and self._memory_proposal_exists(organisation_id, brand_id, cycle_id):
             return
         raw_changes = output.get("changes") if isinstance(output.get("changes"), list) else []
         if not raw_changes:
@@ -155,10 +170,10 @@ class WorkflowRunner:
             ))
         self.repository.create_memory_proposal(MemoryProposal(proposal_id="proposal-" + uuid4().hex[:18], organisation_id=organisation_id, brand_id=brand_id, project_id=project_id, cycle_id=cycle_id, changes=changes))
 
-    def _write_document(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, output: dict[str, Any]) -> None:
+    def _write_document(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, output: dict[str, Any], replace: bool = False) -> None:
         directory = self.repository.root / "organisations" / organisation_id / "brands" / brand_id / "projects" / project_id / "cycles" / cycle_id
         path = directory / "strategy-document.md"
-        if path.exists():
+        if path.exists() and not replace:
             return
         body = output.get("full_document") or output.get("markdown") or ""
         path.write_text("# Strategy document\n\n" + body, encoding="utf-8")

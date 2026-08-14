@@ -57,20 +57,20 @@ class ModelValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             finding.validate()
 
-    def test_attempt_limit_is_initial_plus_two_revisions(self):
+    def test_attempt_number_must_be_positive(self):
         valid = StageAttempt(
-            attempt_id="attempt_three",
-            cycle_id="cycle_one",
-            stage_id="research",
-            attempt_number=3,
-            input_hash=DIGEST,
-        )
-        valid.validate()
-        invalid = StageAttempt(
             attempt_id="attempt_four",
             cycle_id="cycle_one",
             stage_id="research",
             attempt_number=4,
+            input_hash=DIGEST,
+        )
+        valid.validate()
+        invalid = StageAttempt(
+            attempt_id="attempt_zero",
+            cycle_id="cycle_one",
+            stage_id="research",
+            attempt_number=0,
             input_hash=DIGEST,
         )
         with self.assertRaises(ValidationError):

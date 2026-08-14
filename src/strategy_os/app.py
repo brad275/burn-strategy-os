@@ -22,7 +22,7 @@ from .errors import ConflictError, NotFoundError, ValidationError
 from .models import CycleManifest, CycleStatus, FeedbackEvent, FeedbackVerdict, Project, ProjectStatus, utc_now, validate_id
 from .provider import AnthropicProvider, FixtureProvider, LiveStrategyProvider, StrategyProvider, XaiProvider
 from .repository import VaultRepository
-from .workflow import WorkflowRunner
+from .workflow import STRATEGY_PREREQUISITES, WorkflowRunner
 
 
 def slug(value: str) -> str:
@@ -48,6 +48,11 @@ class CycleCreate(BaseModel):
 
 class CycleRetry(BaseModel):
     expected_revision: int = Field(ge=1)
+
+
+class CycleResume(BaseModel):
+    expected_revision: int = Field(ge=1)
+    from_stage: str = Field(pattern="^(research|strategy)$")
 
 
 class FeedbackCreate(BaseModel):
@@ -189,6 +194,31 @@ def create_app(settings: Optional[Settings] = None, provider: Optional[StrategyP
         _spawn_cycle(app, selected, organisation_id, brand_id, project_id, cycle_id)
         return {"cycle": cycle.to_dict(), "poll": f"/api/cycles/{organisation_id}/{brand_id}/{project_id}/{cycle_id}"}
 
+    @app.post("/api/cycles/{organisation_id}/{brand_id}/{project_id}/{cycle_id}/resume", status_code=202)
+    async def resume_cycle(organisation_id: str, brand_id: str, project_id: str, cycle_id: str, body: CycleResume, _: str = Depends(actor)) -> dict[str, Any]:
+        cycle = repository.get_cycle(organisation_id, brand_id, project_id, cycle_id)
+        if cycle.revision != body.expected_revision:
+            raise ConflictError("cycle revision changed; refresh and try again")
+        if cycle.status not in {CycleStatus.FAILED, CycleStatus.COMPLETED}:
+            raise ConflictError("only a failed or completed cycle can be resumed")
+        if cycle_id in app.state.running_cycles:
+            raise ConflictError("this cycle is already running")
+        if not repository.latest_passed_stage_output(organisation_id, brand_id, project_id, cycle_id, "source_collection"):
+            raise ConflictError("cannot resume without passed source collection")
+        if body.from_stage == "strategy":
+            for stage in STRATEGY_PREREQUISITES:
+                if not repository.latest_passed_stage_output(organisation_id, brand_id, project_id, cycle_id, stage):
+                    raise ConflictError("cannot resume from strategy without passed %s" % stage)
+        project = repository.get_project(organisation_id, brand_id, project_id)
+        metadata = _project_metadata(repository, project)
+        selected = _provider_for_mode(app, settings, metadata.get("mode", "live"))
+        cycle = repository.update_cycle_status(organisation_id, brand_id, project_id, cycle_id, CycleStatus.RUNNING, cycle.revision)
+        project = repository.get_project(organisation_id, brand_id, project_id)
+        if project.status == ProjectStatus.REVIEW:
+            repository.update_project_status(organisation_id, brand_id, project_id, ProjectStatus.RUNNING, project.revision, current_cycle_id=cycle_id)
+        _spawn_cycle(app, selected, organisation_id, brand_id, project_id, cycle_id, from_stage=body.from_stage)
+        return {"cycle": cycle.to_dict(), "poll": f"/api/cycles/{organisation_id}/{brand_id}/{project_id}/{cycle_id}"}
+
     @app.get("/api/cycles/{organisation_id}/{brand_id}/{project_id}/{cycle_id}")
     def cycle_detail(organisation_id: str, brand_id: str, project_id: str, cycle_id: str, _: str = Depends(actor)) -> dict[str, Any]:
         cycle = repository.get_cycle(organisation_id, brand_id, project_id, cycle_id)
@@ -244,22 +274,22 @@ def _provider_for_mode(app: FastAPI, settings: Settings, mode: str) -> StrategyP
     return LiveStrategyProvider(AnthropicProvider(settings.anthropic_api_key or ""), XaiProvider(settings.xai_api_key or "", settings.xai_model))
 
 
-def _spawn_cycle(app: FastAPI, provider: StrategyProvider, organisation_id: str, brand_id: str, project_id: str, cycle_id: str) -> None:
+def _spawn_cycle(app: FastAPI, provider: StrategyProvider, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, from_stage: str | None = None) -> None:
     app.state.running_cycles.add(cycle_id)
     if getattr(app.state, "settings", None) and app.state.settings.app_env == "test":
         try:
-            WorkflowRunner(app.state.repository, provider).run(organisation_id, brand_id, project_id, cycle_id)
+            WorkflowRunner(app.state.repository, provider).run(organisation_id, brand_id, project_id, cycle_id, from_stage=from_stage)
         except Exception:
             pass
         app.state.running_cycles.discard(cycle_id)
         return
-    task = asyncio.create_task(_run_cycle(app, provider, organisation_id, brand_id, project_id, cycle_id))
+    task = asyncio.create_task(_run_cycle(app, provider, organisation_id, brand_id, project_id, cycle_id, from_stage))
     task.add_done_callback(lambda __: app.state.running_cycles.discard(cycle_id))
 
 
-async def _run_cycle(app: FastAPI, provider: StrategyProvider, organisation_id: str, brand_id: str, project_id: str, cycle_id: str) -> None:
+async def _run_cycle(app: FastAPI, provider: StrategyProvider, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, from_stage: str | None = None) -> None:
     try:
-        await asyncio.to_thread(WorkflowRunner(app.state.repository, provider).run, organisation_id, brand_id, project_id, cycle_id)
+        await asyncio.to_thread(WorkflowRunner(app.state.repository, provider).run, organisation_id, brand_id, project_id, cycle_id, from_stage)
     except Exception:
         # WorkflowRunner has already moved the cycle to failed and written the
         # safe, user-visible Learning Ledger reason.
