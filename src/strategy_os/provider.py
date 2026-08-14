@@ -14,8 +14,8 @@ SOURCE_COLLECTION_MAX_TOKENS = 6000
 DEFAULT_STAGE_MAX_TOKENS = 7000
 STAGE_MAX_TOKENS = {
     "research": 8000,
-    "competitive": 7000,
-    "audience": 7000,
+    "competitive": 8000,
+    "audience": 8000,
     "reconciliation": 4000,
     "strategy": 7000,
     "opportunities": 7000,
@@ -24,6 +24,7 @@ STAGE_MAX_TOKENS = {
 }
 RESEARCH_SOURCE_LIMIT = 12
 RESEARCH_EXCERPT_CHARS = 240
+COMPACT_TEXT_CHARS = 220
 DEFAULT_XAI_MODEL = "grok-4.6"
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
 
@@ -231,11 +232,27 @@ class AnthropicProvider:
                 "sources must be compact records only: id, label, type, publication_date, accessed_date — only sources you cite.",
                 "Do not copy collected_sources wholesale into the output.",
             ])
+        if stage_id == "competitive":
+            rules.extend([
+                "Keep every limitation, claim, and story name concise; do not write long essays or a body field.",
+                "Cite collected_sources by id. Do not repeat full source records or copy the research object wholesale.",
+                "Include 3–4 competitors and 2–3 unowned stories. Link each story to a research cultural tension name.",
+                "structural_limitation: at most 40 words. each evidence.claim: at most 35 words.",
+                "sources must be compact records only: id, label, type, publication_date, accessed_date — only sources you cite.",
+            ])
+        if stage_id == "audience":
+            rules.extend([
+                "Keep the portrait, tensions, and platform notes concise; do not write long essays.",
+                "Cite collected_sources by id. Do not copy research or competitive records wholesale.",
+                "Include 3–5 behaviors, 2–3 communities, 2–3 audience tensions, and 2–3 platforms.",
+                "audience_portrait.summary: at most 60 words. each evidence.claim: at most 35 words.",
+                "sources must be compact records only: id, label, type, publication_date, accessed_date — only sources you cite.",
+            ])
         return rules
 
     @staticmethod
-    def _research_output_schema() -> dict[str, Any]:
-        evidence = {
+    def _evidence_schema() -> dict[str, Any]:
+        return {
             "id": "evidence-...",
             "claim": "<=35 words",
             "source_ref": "collected source id",
@@ -243,13 +260,20 @@ class AnthropicProvider:
             "confidence": "verified|likely|unverified",
             "freshness": "current|recent|historical",
         }
-        source = {
+
+    @staticmethod
+    def _source_schema() -> dict[str, Any]:
+        return {
             "id": "source-...",
             "label": "short label",
             "type": "report|article|social|earnings|campaign|interview|data|other",
             "publication_date": "YYYY-MM-DD",
             "accessed_date": "YYYY-MM-DD",
         }
+
+    @staticmethod
+    def _research_output_schema() -> dict[str, Any]:
+        evidence, source = AnthropicProvider._evidence_schema(), AnthropicProvider._source_schema()
         return {
             "stage": "research",
             "cycle_id": "from context",
@@ -263,9 +287,34 @@ class AnthropicProvider:
         }
 
     @staticmethod
-    def _context_for_stage(stage_id: str, context: dict[str, Any]) -> dict[str, Any]:
-        if stage_id != "research":
-            return context
+    def _competitive_output_schema() -> dict[str, Any]:
+        evidence, source = AnthropicProvider._evidence_schema(), AnthropicProvider._source_schema()
+        return {
+            "stage": "competitive",
+            "cycle_id": "from context",
+            "brand_slug": "from context",
+            "revision": 1,
+            "competitors": [{"name": "short name", "structural_limitation": "<=40 words", "evidence": evidence}],
+            "unowned_stories": [{"name": "short name", "cultural_tension_ref": "research tension name"}],
+            "sources": [source],
+        }
+
+    @staticmethod
+    def _audience_output_schema() -> dict[str, Any]:
+        evidence, source = AnthropicProvider._evidence_schema(), AnthropicProvider._source_schema()
+        return {
+            "stage": "audience",
+            "cycle_id": "from context",
+            "brand_slug": "from context",
+            "revision": 1,
+            "audience_portrait": {"summary": "<=60 words", "behaviors": ["observable behaviour"], "communities": ["named community"]},
+            "audience_tensions": [{"name": "short name", "evidence": evidence}],
+            "cultural_participation": {"platforms": ["platform"]},
+            "sources": [source],
+        }
+
+    @staticmethod
+    def _compact_sources(context: dict[str, Any]) -> list[dict[str, Any]]:
         collected = context.get("source_collection") if isinstance(context.get("source_collection"), dict) else {}
         compact: list[dict[str, Any]] = []
         raw_sources = collected.get("sources") if isinstance(collected.get("sources"), list) else []
@@ -287,11 +336,69 @@ class AnthropicProvider:
             })
             if len(compact) >= RESEARCH_SOURCE_LIMIT:
                 break
+        return compact
+
+    @staticmethod
+    def _compact_research(research: Any) -> dict[str, Any]:
+        if not isinstance(research, dict):
+            return {}
+        market = research.get("market_position") if isinstance(research.get("market_position"), dict) else {}
+        tensions = []
+        for item in research.get("cultural_tensions") or []:
+            if not isinstance(item, dict):
+                continue
+            evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+            tensions.append({"name": item.get("name"), "claim": _clip_text(evidence.get("claim"), COMPACT_TEXT_CHARS)})
+            if len(tensions) >= 4:
+                break
         return {
+            "market_position_summary": _clip_text(market.get("summary"), 400),
+            "cultural_tensions": tensions,
+        }
+
+    @staticmethod
+    def _compact_competitive(competitive: Any) -> dict[str, Any]:
+        if not isinstance(competitive, dict):
+            return {}
+        competitors = []
+        for item in competitive.get("competitors") or []:
+            if not isinstance(item, dict):
+                continue
+            competitors.append({
+                "name": item.get("name"),
+                "structural_limitation": _clip_text(item.get("structural_limitation"), COMPACT_TEXT_CHARS),
+            })
+            if len(competitors) >= 4:
+                break
+        stories = []
+        for item in competitive.get("unowned_stories") or []:
+            if not isinstance(item, dict):
+                continue
+            stories.append({"name": item.get("name"), "cultural_tension_ref": item.get("cultural_tension_ref")})
+            if len(stories) >= 3:
+                break
+        return {"competitors": competitors, "unowned_stories": stories}
+
+    @staticmethod
+    def _context_for_stage(stage_id: str, context: dict[str, Any]) -> dict[str, Any]:
+        if stage_id not in {"research", "competitive", "audience"}:
+            return context
+        compact = {
             "cycle_id": context.get("cycle_id"),
             "brand_slug": context.get("brand_slug"),
-            "collected_sources": compact,
+            "collected_sources": AnthropicProvider._compact_sources(context),
         }
+        if stage_id in {"competitive", "audience"}:
+            compact["research"] = AnthropicProvider._compact_research(context.get("research"))
+        if stage_id == "audience":
+            compact["competitive"] = AnthropicProvider._compact_competitive(context.get("competitive"))
+        return compact
+
+
+def _clip_text(value: Any, limit: int) -> Any:
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + "…"
 
 
 def build_generate_prompt(stage_id: str, brief: str, context: dict[str, Any], revision: int) -> dict[str, Any]:
@@ -303,8 +410,14 @@ def build_generate_prompt(stage_id: str, brief: str, context: dict[str, Any], re
         "context": AnthropicProvider._context_for_stage(stage_id, context),
         "rules": AnthropicProvider._rules_for_stage(stage_id),
     }
-    if stage_id == "research":
-        prompt["output_schema"] = AnthropicProvider._research_output_schema()
+    schemas = {
+        "research": AnthropicProvider._research_output_schema,
+        "competitive": AnthropicProvider._competitive_output_schema,
+        "audience": AnthropicProvider._audience_output_schema,
+    }
+    builder = schemas.get(stage_id)
+    if builder:
+        prompt["output_schema"] = builder()
     return prompt
 
 

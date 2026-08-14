@@ -155,7 +155,7 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual(prompt["output_schema"]["body"], "<=180 words")
         self.assertEqual(prompt["output_schema"]["sources"][0]["type"].split("|")[0], "report")
 
-    def test_non_research_stage_keeps_default_token_limit(self):
+    def test_competitive_prompt_is_compact_and_uses_stage_token_limit(self):
         captured = {}
 
         def fake_request(prompt, max_tokens, use_web_search):
@@ -164,9 +164,39 @@ class AnthropicProviderTests(unittest.TestCase):
             return {"stage": "competitive"}
 
         self.provider._request = fake_request
+        result = self.provider.generate("competitive", "A working brief.", {
+            "cycle_id": "cycle-1",
+            "brand_slug": "pragmatic-play",
+            "source_collection": {"sources": [{"id": "source-1", "label": "Report", "type": "report", "publication_date": "2026-08-01", "accessed_date": "2026-08-14", "url": "https://example.com", "excerpt": "short"}]},
+            "research": {
+                "body": "A very long research essay that must not be copied wholesale into competitive.",
+                "market_position": {"summary": "A distinctive market position."},
+                "cultural_tensions": [{"name": "Tension one", "evidence": {"claim": "A verified fixture fact supports this observation."}}],
+            },
+        }, 1)
+        self.assertEqual(result, {"stage": "competitive"})
+        self.assertEqual(captured["max_tokens"], STAGE_MAX_TOKENS["competitive"])
+        prompt = captured["prompt"]
+        self.assertNotIn("source_collection", prompt["context"])
+        self.assertNotIn("url", prompt["context"]["collected_sources"][0])
+        self.assertNotIn("body", prompt["context"]["research"])
+        self.assertEqual(prompt["context"]["research"]["cultural_tensions"][0]["name"], "Tension one")
+        joined_rules = " ".join(prompt["rules"]).lower()
+        self.assertIn("copy the research object wholesale", joined_rules)
+        self.assertEqual(prompt["output_schema"]["competitors"][0]["structural_limitation"], "<=40 words")
+
+    def test_later_stage_keeps_full_context_and_its_token_limit(self):
+        captured = {}
+
+        def fake_request(prompt, max_tokens, use_web_search):
+            captured["prompt"] = json.loads(prompt)
+            captured["max_tokens"] = max_tokens
+            return {"stage": "reconciliation"}
+
+        self.provider._request = fake_request
         context = {"cycle_id": "cycle-1", "brand_slug": "pragmatic-play", "research": {"body": "kept"}}
-        self.provider.generate("competitive", "A working brief.", context, 1)
-        self.assertEqual(captured["max_tokens"], DEFAULT_STAGE_MAX_TOKENS)
+        self.provider.generate("reconciliation", "A working brief.", context, 1)
+        self.assertEqual(captured["max_tokens"], STAGE_MAX_TOKENS["reconciliation"])
         self.assertEqual(captured["prompt"]["context"], context)
         self.assertNotIn("output_schema", captured["prompt"])
 
