@@ -112,6 +112,25 @@ class SemanticValidationTests(unittest.TestCase):
         issues = validate_stage_output(payload)
         self.assertIn("M_PROPOSAL_LABEL", {issue.check_id for issue in issues})
 
+    def test_memory_change_requires_evidence_ids(self):
+        payload = {
+            "stage": "memory_proposal",
+            "cycle_id": "cycle_one",
+            "brand_slug": "test-brand",
+            "proposal_status": "proposed",
+            "changes": [{"change_id": "change-position", "operation": "add", "section": "strategic_pov", "content": "A point of view."}],
+            "explore_next": ["Question one", "Question two"],
+            "confidence_flags": {
+                "market_position": "high",
+                "competitive_landscape": "medium",
+                "audience_understanding": "low",
+                "strategic_pov": "medium",
+            },
+            "total_word_count": 10,
+        }
+        issues = validate_stage_output(payload, {"claim_ids": ["evidence_one"]})
+        self.assertIn("M_EVIDENCE_IDS", {issue.check_id for issue in issues})
+
 
 if __name__ == "__main__":
     unittest.main()

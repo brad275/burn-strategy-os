@@ -216,6 +216,18 @@ def _memory(payload: Mapping[str, Any], context: Mapping[str, Any]) -> List[Vali
     issues: List[ValidationIssue] = []
     if payload.get("proposal_status") != "proposed":
         issues.append(_issue("M_PROPOSAL_LABEL", "error", "Memory proposal must start proposed", False))
+    changes = payload.get("changes") if isinstance(payload.get("changes"), list) else []
+    if not changes:
+        issues.append(_issue("M_CHANGE_COUNT", "error", "Memory proposal has no changes", True))
+    known_ids = set(context.get("claim_ids") or [])
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        refs = change.get("evidence_ids")
+        if not isinstance(refs, list) or not refs:
+            issues.append(_issue("M_EVIDENCE_IDS", "error", "Memory change is missing evidence_ids", True))
+        elif known_ids and any(item not in known_ids for item in refs):
+            issues.append(_issue("M_EVIDENCE_IDS", "error", "Memory change cites an unknown evidence id", True))
     if len(payload.get("explore_next", [])) < 2:
         issues.append(_issue("M_EXPLORE", "warning", "Fewer than 2 explore_next directions", True))
     flags = payload.get("confidence_flags", {})

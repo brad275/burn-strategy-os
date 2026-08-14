@@ -261,7 +261,8 @@ class AnthropicProvider:
             rules.extend([
                 "This is a compact memory record, not a strategy essay. Do not copy the document or strategy markdown.",
                 "proposal_status must be proposed.",
-                "Include 1–4 changes. Each content field: at most 80 words. evidence_ids must be existing claim ids.",
+                "Include 1–4 changes. Each content field: at most 80 words.",
+                "Every change MUST include evidence_ids using only ids from context.claim_ids. Never leave evidence_ids empty.",
                 "explore_next: exactly 2 short directions, each at most 20 words.",
                 "confidence_flags keys: market_position, competitive_landscape, audience_understanding, strategic_pov. Values: high, medium, or low. Do not set all four to high.",
                 "total_word_count is the word count of all change content plus explore_next. It must be far below full_document_word_count.",
@@ -361,7 +362,7 @@ class AnthropicProvider:
                 "operation": "add|amend|supersede",
                 "section": "market_position|competitive_landscape|audience_understanding|strategic_pov",
                 "content": "<=80 words",
-                "evidence_ids": ["claim-id"],
+                "evidence_ids": ["id from context.claim_ids"],
             }],
             "explore_next": ["<=20 words", "<=20 words"],
             "confidence_flags": {
@@ -501,6 +502,7 @@ class AnthropicProvider:
                 "brand_slug": context.get("brand_slug"),
                 "coverage_map": context.get("coverage_map") or reconciliation.get("coverage_map") or {},
                 "big_idea": idea.get("name"),
+                "claim_ids": _claim_ids(context),
                 "strategy_excerpt": _clip_text(strategy.get("markdown") or strategy.get("body"), 400),
                 "document_excerpt": _clip_text(document.get("markdown") or document.get("full_document"), 400),
                 "full_document_word_count": context.get("full_document_word_count") or document.get("full_document_word_count"),
@@ -528,6 +530,33 @@ def _clip_text(value: Any, limit: int) -> Any:
     if not isinstance(value, str) or len(value) <= limit:
         return value
     return value[:limit].rstrip() + "…"
+
+
+def _claim_ids(context: dict[str, Any]) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def take(identifier: Any) -> None:
+        if not isinstance(identifier, str) or identifier in seen or len(found) >= 12:
+            return
+        seen.add(identifier)
+        found.append(identifier)
+
+    def walk(value: Any) -> None:
+        if len(found) >= 12:
+            return
+        if isinstance(value, dict):
+            if isinstance(value.get("id"), str) and {"claim", "source_ref"}.issubset(value):
+                take(value["id"])
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    for key in ("research", "competitive", "audience", "source_collection"):
+        walk(context.get(key))
+    return found
 
 
 def build_generate_prompt(stage_id: str, brief: str, context: dict[str, Any], revision: int) -> dict[str, Any]:

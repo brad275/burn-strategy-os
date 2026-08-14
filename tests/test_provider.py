@@ -257,7 +257,7 @@ class XaiProviderTests(unittest.TestCase):
             "cycle_id": "cycle-1",
             "brand_slug": "pragmatic-play",
             "source_collection": {"sources": [{"id": "source-1", "url": "https://example.com", "excerpt": "long"}]},
-            "research": {"body": "A long research essay that must not enter memory context."},
+            "research": {"body": "A long research essay that must not enter memory context.", "signals": [{"id": "evidence-one", "claim": "A fact", "source_ref": "source-1"}]},
             "strategy": {"big_idea": {"name": "Make Each Moment Matter"}, "markdown": "A long strategy essay. " * 40},
             "document_assembly": {"markdown": long_doc, "full_document_word_count": 400},
             "coverage_map": {"market_position": "adequate"},
@@ -269,6 +269,7 @@ class XaiProviderTests(unittest.TestCase):
         self.assertNotIn("research", prompt["context"])
         self.assertNotIn("source_collection", prompt["context"])
         self.assertEqual(prompt["context"]["big_idea"], "Make Each Moment Matter")
+        self.assertEqual(prompt["context"]["claim_ids"], ["evidence-one"])
         self.assertLessEqual(len(prompt["context"]["document_excerpt"]), 401)
         self.assertLessEqual(len(prompt["brief"]), 481)
         self.assertEqual(prompt["output_schema"]["proposal_status"], "proposed")

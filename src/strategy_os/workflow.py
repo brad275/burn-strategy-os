@@ -12,7 +12,7 @@ from .models import (
     CycleStatus, MemoryChange, MemoryOperation, MemoryProposal, ProjectStatus, QualityFinding,
     QualityResult, StageAttempt, StageAttemptStatus,
 )
-from .provider import ProviderError, StrategyProvider
+from .provider import ProviderError, StrategyProvider, _claim_ids
 from .repository import VaultRepository
 from .semantic import validate_stage_output
 
@@ -42,6 +42,8 @@ class WorkflowRunner:
                 passed = self.repository.latest_passed_stage_output(organisation_id, brand_id, project_id, cycle_id, stage)
                 if passed:
                     context[stage] = passed
+            if context.get("memory_proposal") and not self._memory_proposal_exists(organisation_id, brand_id, cycle_id):
+                del context["memory_proposal"]
             brief = (project_dir / "brief.md").read_text(encoding="utf-8")
             if "source_collection" not in context:
                 self._source_collection(organisation_id, brand_id, project_id, cycle_id, brief, context)
@@ -56,6 +58,7 @@ class WorkflowRunner:
             if "reconciliation" not in context:
                 context["reconciliation"] = self._local_reconciliation(organisation_id, brand_id, project_id, cycle_id, context)
             context["coverage_map"] = context["reconciliation"].get("coverage_map", {})
+            context["claim_ids"] = _claim_ids(context)
             for stage in SYNTHESIS_STAGES:
                 active_stage = stage
                 if stage not in context:
@@ -123,13 +126,33 @@ class WorkflowRunner:
         attempt = StageAttempt(attempt_id="attempt-" + uuid4().hex[:18], cycle_id=cycle_id, stage_id=stage, attempt_number=number, status=status, input_hash=hashlib.sha256(payload.encode()).hexdigest(), output=output)
         return self.repository.write_stage_attempt(organisation_id, brand_id, project_id, attempt)
 
-    def _create_memory_proposal(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, output: dict[str, Any]) -> None:
+    def _memory_proposal_exists(self, organisation_id: str, brand_id: str, cycle_id: str) -> bool:
         directory = self.repository.root / "organisations" / organisation_id / "brands" / brand_id / "memory" / "proposals"
-        if directory.exists():
-            for path in directory.glob("*.json"):
-                if json.loads(path.read_text(encoding="utf-8")).get("cycle_id") == cycle_id:
-                    return
-        changes = [MemoryChange(change_id=item["change_id"], operation=MemoryOperation(item["operation"]), section=item["section"], content=item["content"], evidence_ids=item["evidence_ids"]) for item in output["changes"]]
+        if not directory.exists():
+            return False
+        for path in directory.glob("*.json"):
+            if json.loads(path.read_text(encoding="utf-8")).get("cycle_id") == cycle_id:
+                return True
+        return False
+
+    def _create_memory_proposal(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, output: dict[str, Any]) -> None:
+        if self._memory_proposal_exists(organisation_id, brand_id, cycle_id):
+            return
+        raw_changes = output.get("changes") if isinstance(output.get("changes"), list) else []
+        if not raw_changes:
+            raise ValidationError("memory proposals require at least one change")
+        changes = []
+        for item in raw_changes:
+            if not isinstance(item, dict):
+                raise ValidationError("memory changes require evidence_ids")
+            refs = item.get("evidence_ids") or item.get("evidence_refs") or []
+            changes.append(MemoryChange(
+                change_id=item.get("change_id") or ("change-" + uuid4().hex[:12]),
+                operation=MemoryOperation(item.get("operation") or "add"),
+                section=item["section"],
+                content=item["content"],
+                evidence_ids=list(refs),
+            ))
         self.repository.create_memory_proposal(MemoryProposal(proposal_id="proposal-" + uuid4().hex[:18], organisation_id=organisation_id, brand_id=brand_id, project_id=project_id, cycle_id=cycle_id, changes=changes))
 
     def _write_document(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, output: dict[str, Any]) -> None:
