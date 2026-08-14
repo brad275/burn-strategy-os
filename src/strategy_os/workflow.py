@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .errors import ValidationError
 from .models import (
     CycleStatus, MemoryChange, MemoryOperation, MemoryProposal, QualityFinding,
     QualityResult, StageAttempt, StageAttemptStatus,
@@ -59,7 +60,7 @@ class WorkflowRunner:
             cycle = self.repository.get_cycle(organisation_id, brand_id, project_id, cycle_id)
             if cycle.status not in {CycleStatus.COMPLETED, CycleStatus.FAILED}:
                 self.repository.update_cycle_status(organisation_id, brand_id, project_id, cycle_id, CycleStatus.FAILED, cycle.revision)
-            message = str(exc) if isinstance(exc, ProviderError) else "The cycle stopped during %s because an unexpected internal error occurred." % active_stage.replace("_", " ")
+            message = str(exc) if isinstance(exc, (ProviderError, ValidationError)) else "The cycle stopped during %s because an unexpected internal error occurred." % active_stage.replace("_", " ")
             self._write_event(organisation_id, brand_id, project_id, cycle_id, "workflow_failed", {
                 "stage": active_stage,
                 "message": message[:500],
@@ -88,7 +89,7 @@ class WorkflowRunner:
             if not errors:
                 self._write_event(organisation_id, brand_id, project_id, cycle_id, "stage_passed", {"stage": stage, "attempt": revision})
                 return output
-        raise RuntimeError("%s needs human review after two revisions" % stage)
+        raise ValidationError("%s needs human review after two revisions" % stage)
 
     def _write_attempt(self, organisation_id: str, brand_id: str, project_id: str, cycle_id: str, stage: str, number: int, output: dict[str, Any], status: StageAttemptStatus) -> StageAttempt:
         payload = json.dumps(output, sort_keys=True, default=str)

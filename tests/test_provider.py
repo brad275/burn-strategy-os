@@ -50,6 +50,14 @@ class AnthropicProviderTests(unittest.TestCase):
         })
         self.assertEqual(result, {"sources": []})
 
+    def test_preamble_selects_outer_stage_object_not_nested_object(self):
+        expected = {"stage": "research", "market_position": {"summary": "Position"}}
+        result, _ = self.request({
+            "type": "message", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Research complete.\n" + json.dumps(expected)}],
+        })
+        self.assertEqual(result, expected)
+
     def test_pause_turn_then_completion_preserves_original_turn(self):
         paused_content = [
             {"type": "server_tool_use", "id": "srv-1", "name": "web_search", "input": {"query": "example"}},

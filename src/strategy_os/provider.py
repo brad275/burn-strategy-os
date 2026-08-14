@@ -195,15 +195,20 @@ class AnthropicProvider:
             except json.JSONDecodeError:
                 continue
         decoder = json.JSONDecoder()
-        for position in range(len(stripped) - 1, -1, -1):
+        best_result: Any = None
+        best_length = -1
+        for position in range(len(stripped)):
             if stripped[position] != "{":
                 continue
             try:
-                result, _ = decoder.raw_decode(stripped[position:])
+                result, end = decoder.raw_decode(stripped[position:])
             except json.JSONDecodeError:
                 continue
-            if isinstance(result, dict):
-                return result
+            if isinstance(result, dict) and end > best_length:
+                best_result = result
+                best_length = end
+        if best_result is not None:
+            return best_result
         raise original_error
 
 
